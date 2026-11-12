@@ -1,0 +1,45 @@
+ИНСТРУКЦИЯ — Python-бот Funnel (Supabase + Telegram)
+=====================================================
+
+Что нужно: Python 3.10+ и доступ в интернет.
+
+1) КЛЮЧИ (.env)
+   Файл .env лежит рядом с main.py и НЕ загружается на GitHub
+   (исключён в .gitignore). Шаблон без секретов — .env.example.
+
+   В .env должны быть:
+     SUPABASE_URL        → Project URL из Supabase (Project Settings → API):
+                            https://xxxxxxxx.supabase.co
+     SUPABASE_SERVICE_KEY → service_role (Secret) key оттуда же
+   config.py читает их автоматически при запуске.
+
+2) УСТАНОВИТЬ ЗАВИСИМОСТИ (один раз, в этой папке):
+       pip install -r requirements.txt
+
+3) ЗАПУСТИТЬ:
+       python main.py
+   Бот работает, пока открыто окно. Чтобы работал постоянно — запустите
+   на сервере или в фоне.
+
+ПРОВЕРКА:
+   - В Supabase (Table Editor) есть воронки с непустым токеном,
+     data.cache не false, status не Archived — бот подхватит их
+     в течение SYNC_INTERVAL_SECONDS (по умолчанию 20 сек).
+   - Напишите боту в Телеграм /start — он ответит первым шагом воронки.
+   - В таблице funnel_users появится строка с user_id и current_step.
+
+ГДЕ ЧТО ЛЕЖИТ:
+   .env              — ключи (только у тебя, не в git)
+   .env.example      — шаблон .env без секретов
+   config.py         — настройки и константы (без ключей)
+   supabase_client.py — клиент Supabase (PostgREST)
+   telegram_api.py   — обёртка Telegram Bot API
+   storage.py        — кэши воронок/шагов/клавиатур/юзеров
+   steps.py/handlers.py — логика шагов и обработка апдейтов
+   functions.py      — системные сообщения и формулы
+   main.py           — запуск (long polling)
+
+ЕСЛИ БОТ НЕ ОТВЕЧАЕТ:
+   - Проверьте, что .env на месте и в нём нет плейсхолдеров YOUR-... / xxx.
+   - Посмотрите лог: ошибки Supabase/Telegram пишутся в консоль.
+   - Воронка в статусе Archived или с выключенным cache не обслуживается.
