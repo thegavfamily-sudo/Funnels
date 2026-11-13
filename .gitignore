@@ -1,0 +1,21 @@
+# Секреты — никогда в git
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# macOS / Windows / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# local upload helpers with secrets
+env_upload*
