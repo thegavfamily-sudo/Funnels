@@ -384,6 +384,18 @@ def execute_single_formula(formula: str, rows: list[dict], headers: list[str],
                 continue
         return total if total != int(total) else int(total)
 
+    if action == 'mul':
+        product: Optional[float] = None
+        for row in _rows_matching(rows, headers, conditions, today, user_id):
+            try:
+                value = float(row.get(value_column))
+            except (TypeError, ValueError):
+                continue
+            product = value if product is None else product * value
+        if product is None:
+            return 0
+        return int(product) if product == int(product) else product
+
     if action == 'avg':
         total = 0.0
         count = 0
