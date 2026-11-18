@@ -87,7 +87,7 @@ class TestPlayback(unittest.TestCase):
         with mock.patch.object(effects.time, 'sleep') as sleep:
             ok = effects.process_effects(tg, 1, 5, '<effect:blink>Текст</effect>')
         self.assertTrue(ok)
-        # Дефолт blink 300мс → 0.3с, цикл ×2 + финал.
+        # Дефолт blink 300мс → 0.3с: скрыть/показать × циклы.
         delays = [c.args[0] for c in sleep.call_args_list]
         self.assertTrue(delays, 'ожидались задержки')
         self.assertEqual(delays[0], 0.3)

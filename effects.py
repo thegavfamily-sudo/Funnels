@@ -174,14 +174,12 @@ def _play_plan(effect: dict) -> tuple[str, list[tuple[float, str]]]:
     if etype == 'blink':
         delay = _delay_ms(params, 300)
         cycles = _cycles(params, 1, 3)
-        char = params[2] if len(params) > 2 else '⚠️'
+        # Мигает сам обёрнутый текст (без символа-настройки):
+        # показать → скрыть (пробел) → показать…, финал = текст.
         steps = []
         for _ in range(cycles):
-            steps.append((delay, f'{char} {inner}'))
+            steps.append((delay, ' '))
             steps.append((delay, inner))
-        steps.append((delay, inner))
-        if steps:
-            steps[0] = (0.0, steps[0][1])  # первый кадр — сразу
         return inner, steps
 
     if etype == 'reveal':
