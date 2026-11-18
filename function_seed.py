@@ -43,6 +43,17 @@ FUNCTION_SEED: list[dict[str, Any]] = [
         },
     },
     {
+        'id': 'fn_table01',
+        'funnel_id': SYSTEM_FUNNEL_ID,
+        'data': {
+            'type': 'System',
+            'function_name': 'Supabase table',
+            'message': '',
+            'condition': 'Users',
+            'function': '',
+        },
+    },
+    {
         'id': 'fn_live001',
         'funnel_id': SYSTEM_FUNNEL_ID,
         'data': {
@@ -57,17 +68,6 @@ FUNCTION_SEED: list[dict[str, Any]] = [
         },
     },
     {
-        'id': 'fn_auth001',
-        'funnel_id': SYSTEM_FUNNEL_ID,
-        'data': {
-            'type': 'builtin',
-            'function_name': 'auth',
-            'message': '',
-            'condition': 'Users',
-            'function': '',
-        },
-    },
-    {
         'id': 'fn_act0001',
         'funnel_id': SYSTEM_FUNNEL_ID,
         'data': {
@@ -76,77 +76,6 @@ FUNCTION_SEED: list[dict[str, Any]] = [
             'message': 'Вот Ваши данные {result}',
             'condition': 'Activity|auth|mail',
             'function': 'sum(Caloric content, Choice="Шаги")',
-        },
-    },
-    {
-        'id': 'fn_authreq',
-        'funnel_id': SYSTEM_FUNNEL_ID,
-        'data': {
-            'type': 'System',
-            'function_name': 'auth request',
-            'message': (
-                '🆔 Авторизуйтесь в системе: Введите пароль который Вам '
-                'выслал администратор сообщества'
-            ),
-            'condition': '',
-            'function': '',
-        },
-    },
-    {
-        'id': 'fn_authsuc',
-        'funnel_id': SYSTEM_FUNNEL_ID,
-        'data': {
-            'type': 'System',
-            'function_name': 'auth success',
-            'message': 'Выполнен успешно',
-            'condition': '',
-            'function': '',
-        },
-    },
-    {
-        'id': 'fn_authalr',
-        'funnel_id': SYSTEM_FUNNEL_ID,
-        'data': {
-            'type': 'System',
-            'function_name': 'auth already',
-            'message': 'Вы уже аворизованы',
-            'condition': '',
-            'function': '',
-        },
-    },
-    {
-        'id': 'fn_authfal',
-        'funnel_id': SYSTEM_FUNNEL_ID,
-        'data': {
-            'type': 'System',
-            'function_name': 'auth fail',
-            'message': 'Неверный пароль',
-            'condition': '',
-            'function': '',
-        },
-    },
-    {
-        'id': 'fn_authtmo',
-        'funnel_id': SYSTEM_FUNNEL_ID,
-        'data': {
-            'type': 'System',
-            'function_name': 'auth timeout',
-            'message': (
-                'Время ожидания истекло. Нажмите кнопку авторизации снова.'
-            ),
-            'condition': '',
-            'function': '',
-        },
-    },
-    {
-        'id': 'fn_autherr',
-        'funnel_id': SYSTEM_FUNNEL_ID,
-        'data': {
-            'type': 'System',
-            'function_name': 'auth error',
-            'message': '❌ Ошибка авторизации',
-            'condition': '',
-            'function': '',
         },
     },
 ]

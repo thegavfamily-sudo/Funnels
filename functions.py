@@ -114,7 +114,10 @@ def _table_headers(rows: list[dict]) -> list[str]:
 def get_user_field_from_auth(ctx: BotContext, user_id: Any,
                              field_name: str) -> Any:
     try:
-        auth_config = get_function_config(ctx, 'auth')
+        # Одна таблица Supabase (строка «Supabase table»); строка auth —
+        # фолбэк для старых воронок.
+        auth_config = (get_function_config(ctx, 'Supabase table')
+                       or get_function_config(ctx, 'auth'))
         if not auth_config:
             return None
 
@@ -430,11 +433,11 @@ def execute_logical_formula(ctx: BotContext, user_id: Any, condition: str,
         if not formula:
             return '❌ Ошибка: не указан Function'
         if not condition:
-            # Condition не заполняется: всё в ОДНОЙ таблице, куда пишутся
-            # пользователи (таблица авторизации auth). Берём её оттуда,
-            # фолбэк — Users.
-            auth_cfg = get_function_config(ctx, 'auth') or {}
-            table = str(auth_cfg.get('condition') or 'Users').split('|')[0]
+            # Condition не нужен: одна таблица Supabase — строка
+            # «Supabase table»; auth — фолбэк для старых воронок.
+            table_cfg = (get_function_config(ctx, 'Supabase table')
+                         or get_function_config(ctx, 'auth') or {})
+            table = str(table_cfg.get('condition') or 'Users').split('|')[0]
             condition = table.strip() or 'Users'
 
         condition_parts = condition.split('|')
