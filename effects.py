@@ -155,24 +155,39 @@ def extract_pure_text(effect_content: Any) -> Any:
 # Проигрывание (EffectsHandler)
 # ---------------------------------------------------------------------------
 
-def _delay_ms(params: list[str], default: int) -> float:
-    """Порт: effect.params[0] ? parseInt(...) : default; NaN → default."""
+# Защита от «умирающего» бота: длинный кадр/много циклов блокируют
+# поток обработки на минуты (регресс: бот переставал отвечать).
+_MAX_DELAY_MS = 5000
+_MAX_CYCLES = 20
+
+
+def _delay_ms(params: list[str], default_ms: int) -> float:
+    """Задержка кадра в СЕКУНДАХ для time.sleep (кламп 0…5с).
+
+    Порт: effect.params[0] ? parseInt(...) : default — но оригинальный
+    Utilities.sleep принимает миллисекунды, time.sleep — секунды,
+    поэтому и параметр, и дефолт делим на 1000.
+    """
     if not params:
-        return default
-    try:
-        value = int(params[0])
-    except (ValueError, TypeError):
-        return default
-    return max(value, 0) / 1000.0
+        ms = default_ms
+    else:
+        try:
+            ms = int(params[0])
+        except (ValueError, TypeError):
+            ms = default_ms
+    ms = min(max(ms, 0), _MAX_DELAY_MS)
+    return ms / 1000.0
 
 
 def _cycles(params: list[str], index: int, default: int) -> int:
     if len(params) <= index:
-        return default
-    try:
-        return max(int(params[index]), 0)
-    except (ValueError, TypeError):
-        return default
+        value = default
+    else:
+        try:
+            value = int(params[index])
+        except (ValueError, TypeError):
+            value = default
+    return min(max(value, 0), _MAX_CYCLES)
 
 
 def process_effects(tg, chat_id, message_id: int, content: str,
