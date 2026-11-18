@@ -427,8 +427,15 @@ def execute_single_formula(formula: str, rows: list[dict], headers: list[str],
 def execute_logical_formula(ctx: BotContext, user_id: Any, condition: str,
                             formula: str) -> Any:
     try:
-        if not condition or not formula:
-            return '❌ Ошибка: не указаны Condition или Function'
+        if not formula:
+            return '❌ Ошибка: не указан Function'
+        if not condition:
+            # Condition не заполняется: всё в ОДНОЙ таблице, куда пишутся
+            # пользователи (таблица авторизации auth). Берём её оттуда,
+            # фолбэк — Users.
+            auth_cfg = get_function_config(ctx, 'auth') or {}
+            table = str(auth_cfg.get('condition') or 'Users').split('|')[0]
+            condition = table.strip() or 'Users'
 
         condition_parts = condition.split('|')
         table_info = condition_parts[0].split('!')
