@@ -131,6 +131,38 @@ class TestReveal(unittest.TestCase):
         content = f'<effect:reveal:500:cum>Привет|{source}</effect>'
         self.assertEqual(effects.get_final_text(content), source)
 
+    def test_single_phrase_reveal_autoframes(self):
+        # Одна фраза без «|» — бот сам раскрывает по словам (формат
+        # гугл-скрипта «слово|слово» здесь не нужен).
+        content = '<effect:reveal:800>Без вебинаров</effect>'
+        tg = FakeTG()
+        with mock.patch.object(effects.time, 'sleep') as sleep:
+            ok = effects.process_effects(tg, 1, 1, content)
+        self.assertTrue(ok)
+        self.assertEqual(tg.edits, ['Без', 'Без вебинаров'])
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [0.8, 0.8])
+        # Старт пустой (появление с нуля), итог = исход.
+        self.assertEqual(effects.get_initial_text(content), '')
+        self.assertEqual(effects.get_final_text(content), 'Без вебинаров')
+
+    def test_single_word_reveal_by_letters(self):
+        tg = FakeTG()
+        with mock.patch.object(effects.time, 'sleep'):
+            ok = effects.process_effects(
+                tg, 1, 1, '<effect:reveal>Без</effect>')
+        self.assertTrue(ok)
+        self.assertEqual(tg.edits, ['Б', 'Бе', 'Без'])
+
+    def test_one_char_reveal_shows_text_immediately(self):
+        content = '<effect:reveal>А</effect>'
+        tg = FakeTG()
+        with mock.patch.object(effects.time, 'sleep') as sleep:
+            ok = effects.process_effects(tg, 1, 1, content)
+        self.assertFalse(ok)
+        sleep.assert_not_called()
+        # Анимировать нечего — сразу весь текст, а не пустое сообщение.
+        self.assertEqual(effects.get_initial_text(content), 'А')
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

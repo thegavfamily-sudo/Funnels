@@ -84,6 +84,27 @@ def _is_cum(effect: dict) -> bool:
     return len(params) > 1 and params[1].lower() in ('cum', 'raw')
 
 
+def _auto_reveal_frames(text: str) -> list[str]:
+    """Кадры появления для ОДНОЙ фразы (без `|`): по словам, одно слово —
+    по буквам. Каждый кадр — префикс исхода, финал совпадает побуквенно."""
+    if not text:
+        return []
+    cuts = [i for i in range(1, len(text))
+            if text[i - 1].isspace() and not text[i].isspace()]
+    if not cuts:
+        # одно слово: ~не больше 12 кадров, иначе очень долго.
+        step = max(1, -(-len(text) // 12))
+        cuts = list(range(step, len(text), step))
+    frames: list[str] = []
+    for c in cuts:
+        frame = text[:c].rstrip()
+        if frame:
+            frames.append(frame)
+    if not frames or frames[-1] != text:
+        frames.append(text)
+    return frames
+
+
 def get_final_text(content: Any) -> str:
     """Итоговый текст после проигрывания эффекта (кадры → последний)."""
     if not content or not isinstance(content, str):
@@ -143,7 +164,13 @@ def get_initial_text(content: Any) -> str:
         initial_text += inner or '⚠️'
     elif effect['type'] == 'reveal':
         parts = inner.split('|')
-        initial_text += (parts[0] if parts and parts[0] else '') if parts else ''
+        if len(parts) == 1:
+            # Одна фраза: старт пустой, появление генерит process_reveal;
+            # если анимировать нечего (1 символ) — сразу весь текст.
+            if len(_auto_reveal_frames(inner)) < 2:
+                initial_text += inner
+        else:
+            initial_text += (parts[0] if parts and parts[0] else '') if parts else ''
     else:
         initial_text += inner
 
@@ -296,6 +323,18 @@ def _process_reveal(tg, chat_id, message_id: int, effect: dict,
                     prefix: str, suffix: str) -> bool:
     delay = _delay_ms(effect['params'], 500)
     parts = effect['inner_content'].split('|')
+
+    if len(parts) == 1:
+        # Одна фраза («слово|слово» — формат гугл-скрипта, здесь не нужен):
+        # бот сам раскрывает её плавно — по словам, одно слово по буквам.
+        parts = _auto_reveal_frames(effect['inner_content'])
+        if len(parts) < 2:
+            return False
+        for part in parts:
+            tg.edit_message_text(chat_id, message_id, prefix + part + suffix)
+            time.sleep(delay)
+        return True
+
     if len(parts) < 2:
         return False
 
