@@ -78,6 +78,12 @@ def _outer_effect(effects: Optional[list[dict]]) -> Optional[dict]:
     return outer[0] if outer else None
 
 
+def _is_cum(effect: dict) -> bool:
+    """reveal в режиме cum: кадр = полный текст (префиксы), не накопление."""
+    params = effect.get('params') or []
+    return len(params) > 1 and params[1].lower() in ('cum', 'raw')
+
+
 def get_final_text(content: Any) -> str:
     """Итоговый текст после проигрывания эффекта (кадры → последний)."""
     if not content or not isinstance(content, str):
@@ -90,9 +96,18 @@ def get_final_text(content: Any) -> str:
     final_text = content[:effect['start_index']]
     inner = effect['inner_content']
 
-    if effect['type'] in ('countdown', 'progress', 'spinner', 'reveal'):
+    if effect['type'] in ('countdown', 'progress', 'spinner'):
         parts = inner.split('|')
         final_text += parts[-1] if parts and parts[-1] else ''
+    elif effect['type'] == 'reveal':
+        parts = inner.split('|')
+        if not parts:
+            final_text += ''
+        elif _is_cum(effect):
+            final_text += parts[-1]
+        else:
+            # Анимация заканчивается накопленным текстом — итог = все кадры.
+            final_text += '\n'.join(parts)
     elif effect['type'] == 'blink':
         final_text += inner or ''
     else:
@@ -283,6 +298,14 @@ def _process_reveal(tg, chat_id, message_id: int, effect: dict,
     parts = effect['inner_content'].split('|')
     if len(parts) < 2:
         return False
+
+    if _is_cum(effect):
+        # Кадры — готовый полный текст (префиксы выделения): показываем как
+        # есть, финал совпадает с исходом побуквенно.
+        for part in parts:
+            tg.edit_message_text(chat_id, message_id, prefix + part + suffix)
+            time.sleep(delay)
+        return True
 
     combined = prefix
     for i, part in enumerate(parts):

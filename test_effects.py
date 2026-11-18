@@ -109,5 +109,28 @@ class TestPlayback(unittest.TestCase):
         self.assertEqual(tg.edits, ['Привет', 'Привет\nМир'])
 
 
+class TestReveal(unittest.TestCase):
+    def test_final_is_accumulated(self):
+        # Итог = все кадры через \n (как после анимации), а не последний.
+        content = '<effect:reveal>А|Б</effect>'
+        self.assertEqual(effects.get_final_text(content), 'А\nБ')
+
+    def test_cum_mode_shows_full_frames(self):
+        content = '<effect:reveal:500:cum>Привет|Привет мир</effect>'
+        tg = FakeTG()
+        with mock.patch.object(effects.time, 'sleep'):
+            ok = effects.process_effects(tg, 1, 1, content)
+        self.assertTrue(ok)
+        self.assertEqual(tg.edits, ['Привет', 'Привет мир'])
+        self.assertEqual(effects.get_final_text(content), 'Привет мир')
+        self.assertEqual(effects.get_initial_text(content), 'Привет')
+
+    def test_cum_final_equals_source_text(self):
+        # Финал cum-режима совпадает с исходом побуквенно (без \n).
+        source = 'Привет  мир'  # двойной пробель сохраняется
+        content = f'<effect:reveal:500:cum>Привет|{source}</effect>'
+        self.assertEqual(effects.get_final_text(content), source)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
