@@ -76,10 +76,11 @@ class TestPlayback(unittest.TestCase):
             ok = effects.process_effects(
                 tg, 1, 5, '<effect:countdown>3|2|1|🚀</effect>')
         self.assertTrue(ok)
-        self.assertEqual(tg.edits, ['3', '2', '1', '🚀'])
+        # Старт '3' уже на экране (get_initial_text) — process играет шаги.
+        self.assertEqual(tg.edits, ['2', '1', '🚀'])
         # Все задержки — секунды (0.8), а не 800.
         self.assertEqual(
-            [c.args[0] for c in sleep.call_args_list], [0.8, 0.8, 0.8, 0.8])
+            [c.args[0] for c in sleep.call_args_list], [0.8, 0.8, 0.8])
 
     def test_default_delay_for_blink(self):
         tg = FakeTG()
@@ -106,7 +107,8 @@ class TestPlayback(unittest.TestCase):
             ok = effects.process_effects(
                 tg, 1, 5, '<effect:reveal>Привет|Мир</effect>')
         self.assertTrue(ok)
-        self.assertEqual(tg.edits, ['Привет', 'Привет\nМир'])
+        # Старт 'Привет' уже на экране — один шаг накопления.
+        self.assertEqual(tg.edits, ['Привет\nМир'])
 
 
 class TestReveal(unittest.TestCase):
@@ -121,7 +123,7 @@ class TestReveal(unittest.TestCase):
         with mock.patch.object(effects.time, 'sleep'):
             ok = effects.process_effects(tg, 1, 1, content)
         self.assertTrue(ok)
-        self.assertEqual(tg.edits, ['Привет', 'Привет мир'])
+        self.assertEqual(tg.edits, ['Привет мир'])
         self.assertEqual(effects.get_final_text(content), 'Привет мир')
         self.assertEqual(effects.get_initial_text(content), 'Привет')
 
@@ -154,6 +156,27 @@ class TestReveal(unittest.TestCase):
         self.assertEqual(tg.edits, ['А'])
         self.assertEqual([c.args[0] for c in sleep.call_args_list], [0.5])
         self.assertEqual(effects.get_initial_text(content), '')
+
+
+class TestMultipleEffects(unittest.TestCase):
+    def test_two_phrases_play_sequentially(self):
+        # Каждая фраза в своём теге — проигрывание фраза за фразой.
+        content = ('🚫 <effect:reveal:800>Без вебинаров</effect>\n'
+                   '<effect:reveal:800>Без соц сетей</effect>')
+        # Старт: обе пустые, сырых тегов не видно (иначе Telegram 400).
+        self.assertEqual(effects.get_initial_text(content), '🚫 \n')
+        tg = FakeTG()
+        with mock.patch.object(effects.time, 'sleep') as sleep:
+            ok = effects.process_effects(tg, 1, 1, content)
+        self.assertTrue(ok)
+        self.assertEqual(tg.edits, [
+            '🚫 Без вебинаров\n',
+            '🚫 Без вебинаров\nБез соц сетей',
+        ])
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [0.8, 0.8])
+        self.assertEqual(
+            effects.get_final_text(content),
+            '🚫 Без вебинаров\nБез соц сетей')
 
 
 if __name__ == '__main__':

@@ -1,13 +1,17 @@
 # ============================================================================
-# effects.py — эффекты <effect:*>...</effect> в текстовых сообщениях
+# effects.py — эффекты <effect:*>... в текстовых сообщениях
 #
-# Порты из apps_script/БОТ_готовый.gs:
+# Порт из apps_script/БОТ_готовый.gs:
 #   Utils.parseEffects   :602   Utils.hasEffects  :649
 #   Utils.getFinalText   :654   Utils.getInitialText :687
 #   Utils.extractPureText:729   EffectsHandler     :6330
 #
 # Типы: countdown / progress / spinner / blink / reveal.
 # Кадры внутри тега разделены '|'; задержки — time.sleep (как Utilities.sleep).
+#
+# В СООБЩЕНИИ МОЖЕТ БЫТЬ НЕСКОЛЬКО тегов — они проигрываются ПОСЛЕДОВАТЕЛЬНО
+# (фраза за фразой): старт = все эффекты в своих первых кадрах, затем
+# по очереди каждый доводится до финала.
 # ============================================================================
 
 from __future__ import annotations
@@ -22,6 +26,11 @@ import config
 logger = logging.getLogger(__name__)
 
 _TAG_RE = re.compile(r'<effect:(\w+)(?::([^>]+))?>|</effect>', re.IGNORECASE)
+
+# Защита от «умирающего» бота: длинный кадр/много циклов блокируют
+# поток обработки на минуты (регресс: бот переставал отвечать).
+_MAX_DELAY_MS = 5000
+_MAX_CYCLES = 20
 
 
 def parse_effects(content: Any) -> Optional[list[dict]]:
@@ -71,113 +80,9 @@ def has_effects(content: Any) -> bool:
     return '<effect:' in content and '</effect>' in content
 
 
-def _outer_effect(effects: Optional[list[dict]]) -> Optional[dict]:
-    if not effects:
-        return None
-    outer = [e for e in effects if e['depth'] == 0]
-    return outer[0] if outer else None
-
-
-def _is_cum(effect: dict) -> bool:
-    """reveal в режиме cum: кадр = полный текст (префиксы), не накопление."""
-    params = effect.get('params') or []
-    return len(params) > 1 and params[1].lower() in ('cum', 'raw')
-
-
-def get_final_text(content: Any) -> str:
-    """Итоговый текст после проигрывания эффекта (кадры → последний)."""
-    if not content or not isinstance(content, str):
-        return content or ''
-
-    effect = _outer_effect(parse_effects(content))
-    if not effect:
-        return content
-
-    final_text = content[:effect['start_index']]
-    inner = effect['inner_content']
-
-    if effect['type'] in ('countdown', 'progress', 'spinner'):
-        parts = inner.split('|')
-        final_text += parts[-1] if parts and parts[-1] else ''
-    elif effect['type'] == 'reveal':
-        parts = inner.split('|')
-        if not parts:
-            final_text += ''
-        elif _is_cum(effect):
-            final_text += parts[-1]
-        else:
-            # Анимация заканчивается накопленным текстом — итог = все кадры.
-            final_text += '\n'.join(parts)
-    elif effect['type'] == 'blink':
-        final_text += inner or ''
-    else:
-        final_text += inner
-
-    final_text += content[effect['start_index'] + len(effect['full_content']):]
-    return final_text
-
-
-def get_initial_text(content: Any) -> str:
-    """Первый кадр эффекта для отправки перед проигрыванием."""
-    if not content or not isinstance(content, str):
-        return content or ''
-
-    effect = _outer_effect(parse_effects(content))
-    if not effect:
-        return content
-
-    initial_text = content[:effect['start_index']]
-    inner = effect['inner_content']
-    params = effect['params']
-
-    if effect['type'] == 'countdown':
-        parts = inner.split('|')
-        initial_text += (parts[0] if parts and parts[0] else '3') if parts else '3'
-    elif effect['type'] == 'progress':
-        parts = inner.split('|')
-        initial_text += (parts[0] if parts and parts[0] else '[░░░] 0%') if parts else '[░░░] 0%'
-    elif effect['type'] == 'spinner':
-        parts = inner.split('|')
-        initial_text += (parts[0] if parts and parts[0] else 'Загрузка') if parts else 'Загрузка'
-    elif effect['type'] == 'blink':
-        initial_text += inner or '⚠️'
-    elif effect['type'] == 'reveal':
-        parts = inner.split('|')
-        if len(parts) != 1:
-            initial_text += (parts[0] if parts and parts[0] else '') if parts else ''
-        # Одна фраза: старт пустой — фраза появится целиком (см.
-        # _process_reveal: пауза delay, затем полный текст).
-    else:
-        initial_text += inner
-
-    initial_text += content[effect['start_index'] + len(effect['full_content']):]
-    return initial_text
-
-
-def extract_pure_text(effect_content: Any) -> Any:
-    """Снять все теги, оставив содержимое (Utils.extractPureText :729)."""
-    if not effect_content or not isinstance(effect_content, str):
-        return effect_content
-
-    text = effect_content
-    effects = parse_effects(text)
-    if effects:
-        for effect in sorted(effects, key=lambda e: -e['start_index']):
-            text = (text[:effect['start_index']]
-                    + effect['inner_content']
-                    + text[effect['start_index'] + len(effect['full_content']):])
-    return text
-
-
 # ---------------------------------------------------------------------------
-# Проигрывание (EffectsHandler)
+# Параметры / клампы
 # ---------------------------------------------------------------------------
-
-# Защита от «умирающего» бота: длинный кадр/много циклов блокируют
-# поток обработки на минуты (регресс: бот переставал отвечать).
-_MAX_DELAY_MS = 5000
-_MAX_CYCLES = 20
-
 
 def _delay_ms(params: list[str], default_ms: int) -> float:
     """Задержка кадра в СЕКУНДАХ для time.sleep (кламп 0…5с).
@@ -208,121 +113,180 @@ def _cycles(params: list[str], index: int, default: int) -> int:
     return min(max(value, 0), _MAX_CYCLES)
 
 
+def _is_cum(effect: dict) -> bool:
+    """reveal в режиме cum: кадр = полный текст (префиксы), не накопление."""
+    params = effect.get('params') or []
+    return len(params) > 1 and params[1].lower() in ('cum', 'raw')
+
+
+# ---------------------------------------------------------------------------
+# План проигрывания и рендер
+# ---------------------------------------------------------------------------
+
+def _outer_list(content: str) -> list[dict]:
+    """Внешние (depth=0) эффекты в порядке их появления в тексте."""
+    effects = parse_effects(content)
+    if not effects:
+        return []
+    outer = [e for e in effects if e['depth'] == 0]
+    outer.sort(key=lambda e: e['start_index'])
+    return outer
+
+
+def _play_plan(effect: dict) -> tuple[str, list[tuple[float, str]]]:
+    """(стартовое состояние, шаги [(пауза_сек_перед_показом, текст)]).
+
+    Стартовое состояние — то, что уже на экране (get_initial_text);
+    каждый шаг: подождать паузу, затем показать текст (полный рендер).
+    """
+    etype = effect['type']
+    inner = effect['inner_content']
+    params = effect['params']
+    parts = inner.split('|')
+
+    if etype == 'countdown':
+        delay = _delay_ms(params, 800)
+        if len(parts) < 2:
+            return inner, []
+        return parts[0], [(delay, p) for p in parts[1:]]
+
+    if etype == 'progress':
+        delay = _delay_ms(params, 300)
+        if len(parts) < 2:
+            return inner, []
+        return parts[0], [(delay, p) for p in parts[1:]]
+
+    if etype == 'spinner':
+        delay = _delay_ms(params, 200)
+        cycles = _cycles(params, 1, 3)
+        if len(parts) < 2:
+            return inner, []
+        steps: list[tuple[float, str]] = []
+        for _ in range(cycles):
+            for part in parts:
+                for char in ('/', '-', '\\', '|'):
+                    steps.append((delay, part + ' ' + char))
+        steps.append((delay, parts[-1] + ' ✓'))
+        if steps:
+            steps[0] = (0.0, steps[0][1])  # первый кадр — сразу
+        return parts[0], steps
+
+    if etype == 'blink':
+        delay = _delay_ms(params, 300)
+        cycles = _cycles(params, 1, 3)
+        char = params[2] if len(params) > 2 else '⚠️'
+        steps = []
+        for _ in range(cycles):
+            steps.append((delay, f'{char} {inner}'))
+            steps.append((delay, inner))
+        steps.append((delay, inner))
+        if steps:
+            steps[0] = (0.0, steps[0][1])  # первый кадр — сразу
+        return inner, steps
+
+    if etype == 'reveal':
+        delay = _delay_ms(params, 500)
+        if len(parts) == 1:
+            # Одна фраза: старт пустой → пауза → ВСЯ фраза целиком.
+            if not inner.strip():
+                return '', []
+            return '', [(delay, inner)]
+        if _is_cum(effect):
+            # Кадры — готовый полный текст: показываем как есть.
+            return parts[0], [(delay, p) for p in parts[1:]]
+        # Накопление строк (формат гугл-скрипта «а|б»).
+        steps = []
+        combined = parts[0]
+        for part in parts[1:]:
+            combined += '\n' + part
+            steps.append((delay, combined))
+        return parts[0], steps
+
+    # Неизвестный тип — без анимации.
+    return inner, []
+
+
+def _render(content: str, outer: list[dict], states: list[str]) -> str:
+    """Полный текст сообщения: каждый внешний эффект заменён своим состоянием."""
+    out = content
+    for eff, state in sorted(zip(outer, states),
+                             key=lambda p: -p[0]['start_index']):
+        out = (out[:eff['start_index']] + state
+               + out[eff['start_index'] + len(eff['full_content']):])
+    return out
+
+
+def get_final_text(content: Any) -> str:
+    """Итоговый текст после проигрывания всех эффектов."""
+    if not content or not isinstance(content, str):
+        return content or ''
+    outer = _outer_list(content)
+    if not outer:
+        return content
+    states = []
+    for eff in outer:
+        initial, steps = _play_plan(eff)
+        states.append(steps[-1][1] if steps else initial)
+    return _render(content, outer, states)
+
+
+def get_initial_text(content: Any) -> str:
+    """Старт: каждый эффект в своём первом состоянии (тегов не видно)."""
+    if not content or not isinstance(content, str):
+        return content or ''
+    outer = _outer_list(content)
+    if not outer:
+        return content
+    states = [_play_plan(eff)[0] for eff in outer]
+    return _render(content, outer, states)
+
+
+def extract_pure_text(effect_content: Any) -> Any:
+    """Снять все теги, оставив содержимое (Utils.extractPureText :729)."""
+    if not effect_content or not isinstance(effect_content, str):
+        return effect_content
+
+    text = effect_content
+    effects = parse_effects(text)
+    if effects:
+        for effect in sorted(effects, key=lambda e: -e['start_index']):
+            text = (text[:effect['start_index']]
+                    + effect['inner_content']
+                    + text[effect['start_index'] + len(effect['full_content']):])
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Проигрывание (EffectsHandler, порт :6330 — теперь для всех тегов сразу)
+# ---------------------------------------------------------------------------
+
 def process_effects(tg, chat_id, message_id: int, content: str,
                     user_id: Any = None) -> bool:
-    """Проиграть внешний эффект через editMessageText (EffectsHandler :6330)."""
+    """Проиграть внешние эффекты ПОСЛЕДОВАТЕЛЬНО через editMessageText.
+
+    Сообщение уже отправлено в стартовом состоянии (get_initial_text);
+    здесь каждый эффект по очереди доводится до финала, каждый кадр —
+    полный рендер сообщения со всеми состояниями.
+    """
     try:
-        effects = parse_effects(content)
-        effect = _outer_effect(effects)
-        if not effect:
+        outer = _outer_list(content)
+        if not outer:
+            return False
+        plans = [_play_plan(eff) for eff in outer]
+        if not any(steps for _, steps in plans):
             return False
 
-        prefix_text = content[:effect['start_index']]
-        suffix_text = content[effect['start_index'] + len(effect['full_content']):]
-        effect_type = effect['type']
-
-        if effect_type == 'countdown':
-            return _process_frames(tg, chat_id, message_id, effect,
-                                   prefix_text, suffix_text,
-                                   _delay_ms(effect['params'], 800))
-        if effect_type == 'progress':
-            return _process_frames(tg, chat_id, message_id, effect,
-                                   prefix_text, suffix_text,
-                                   _delay_ms(effect['params'], 300))
-        if effect_type == 'spinner':
-            return _process_spinner(tg, chat_id, message_id, effect,
-                                    prefix_text, suffix_text)
-        if effect_type == 'blink':
-            return _process_blink(tg, chat_id, message_id, effect,
-                                  prefix_text, suffix_text)
-        if effect_type == 'reveal':
-            return _process_reveal(tg, chat_id, message_id, effect,
-                                   prefix_text, suffix_text)
-        return False
+        states = [initial for initial, _ in plans]
+        animated = False
+        for i, (_, steps) in enumerate(plans):
+            for delay, text in steps:
+                if delay > 0:
+                    time.sleep(delay)
+                states[i] = text
+                tg.edit_message_text(
+                    chat_id, message_id, _render(content, outer, states))
+                animated = True
+        return animated
     except Exception as error:  # noqa: BLE001
         logger.error('[processEffects] %s', error)
         return False
-
-
-def _process_frames(tg, chat_id, message_id: int, effect: dict,
-                    prefix: str, suffix: str, delay: float) -> bool:
-    """countdown/progress: каждый кадр через запятую-разделитель |."""
-    parts = effect['inner_content'].split('|')
-    if len(parts) < 2:
-        return False
-    for part in parts:
-        tg.edit_message_text(chat_id, message_id, prefix + part + suffix)
-        time.sleep(delay)
-    return True
-
-
-def _process_spinner(tg, chat_id, message_id: int, effect: dict,
-                     prefix: str, suffix: str) -> bool:
-    delay = _delay_ms(effect['params'], 200)
-    cycles = _cycles(effect['params'], 1, 3)
-    parts = effect['inner_content'].split('|')
-    if len(parts) < 2:
-        return False
-
-    spinner_chars = ['/', '-', '\\', '|']
-    for _ in range(cycles):
-        for part in parts:
-            for char in spinner_chars:
-                tg.edit_message_text(chat_id, message_id,
-                                     prefix + part + ' ' + char + suffix)
-                time.sleep(delay)
-
-    final_text = prefix + parts[-1] + ' ✓' + suffix
-    tg.edit_message_text(chat_id, message_id, final_text)
-    return True
-
-
-def _process_blink(tg, chat_id, message_id: int, effect: dict,
-                   prefix: str, suffix: str) -> bool:
-    delay = _delay_ms(effect['params'], 300)
-    cycles = _cycles(effect['params'], 1, 3)
-    blink_char = effect['params'][2] if len(effect['params']) > 2 else '⚠️'
-    text = effect['inner_content']
-
-    for _ in range(cycles):
-        tg.edit_message_text(chat_id, message_id,
-                             prefix + blink_char + ' ' + text + suffix)
-        time.sleep(delay)
-        tg.edit_message_text(chat_id, message_id, prefix + text + suffix)
-        time.sleep(delay)
-
-    tg.edit_message_text(chat_id, message_id, prefix + text + suffix)
-    return True
-
-
-def _process_reveal(tg, chat_id, message_id: int, effect: dict,
-                    prefix: str, suffix: str) -> bool:
-    delay = _delay_ms(effect['params'], 500)
-    parts = effect['inner_content'].split('|')
-
-    if len(parts) == 1:
-        # Одна фраза (формат «слово|слово» — из гугл-скрипта, здесь не нужен):
-        # пауза delay «через время», затем ВСЯ фраза целиком за один шаг.
-        text = effect['inner_content']
-        if not text.strip():
-            return False
-        time.sleep(delay)
-        tg.edit_message_text(chat_id, message_id, prefix + text + suffix)
-        return True
-
-    if len(parts) < 2:
-        return False
-
-    if _is_cum(effect):
-        # Кадры — готовый полный текст (префиксы): показываем как есть.
-        for part in parts:
-            tg.edit_message_text(chat_id, message_id, prefix + part + suffix)
-            time.sleep(delay)
-        return True
-
-    combined = prefix
-    for i, part in enumerate(parts):
-        combined += ('\n' if i > 0 else '') + part
-        tg.edit_message_text(chat_id, message_id, combined + suffix)
-        time.sleep(delay)
-    return True
