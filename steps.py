@@ -1375,7 +1375,8 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
                         try:
                             effects_processed = effects.process_effects(
                                 ctx.tg, chat_id, initial_message_id,
-                                message_text, user_id)
+                                message_text, user_id,
+                                edit_options=options)
                             if effects_processed:
                                 _pin_if_needed(ctx, chat_id, initial_message_id,
                                                should_pin)
@@ -1383,7 +1384,7 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
                             final_text = effects.get_final_text(message_text)
                             if final_text and final_text.strip() != '':
                                 ctx.tg.edit_message_text(chat_id, initial_message_id,
-                                                         final_text)
+                                                         final_text, options)
                 except Exception:  # noqa: BLE001
                     ctx.tg.send_message(chat_id,
                                         effects.get_final_text(message_text),
@@ -1457,7 +1458,7 @@ def update_step_message(ctx: BotContext, chat_id, message_id: int,
         time.sleep(0.5)
         try:
             effects.process_effects(ctx.tg, chat_id, message_id, message_text,
-                                    user_id)
+                                    user_id, edit_options=options)
         except Exception:  # noqa: BLE001
             final_text = effects.get_final_text(message_text)
             if final_text and final_text.strip() != '':

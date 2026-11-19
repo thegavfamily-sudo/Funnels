@@ -259,7 +259,8 @@ def extract_pure_text(effect_content: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 def process_effects(tg, chat_id, message_id: int, content: str,
-                    user_id: Any = None) -> bool:
+                    user_id: Any = None,
+                    edit_options: Optional[dict] = None) -> bool:
     """Проиграть внешние эффекты ПОСЛЕДОВАТЕЛЬНО через editMessageText.
 
     Сообщение уже отправлено в стартовом состоянии (get_initial_text);
@@ -281,8 +282,11 @@ def process_effects(tg, chat_id, message_id: int, content: str,
                 if delay > 0:
                     time.sleep(delay)
                 states[i] = text
+                # edit_options обязателен при инлайн-клавиатуре: без
+                # reply_markup Telegram СНИМАЕТ клавиатуру при редактировании.
                 tg.edit_message_text(
-                    chat_id, message_id, _render(content, outer, states))
+                    chat_id, message_id, _render(content, outer, states),
+                    edit_options)
                 animated = True
         return animated
     except Exception as error:  # noqa: BLE001

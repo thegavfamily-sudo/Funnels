@@ -23,9 +23,11 @@ class FakeTG:
 
     def __init__(self):
         self.edits: list[str] = []
+        self.edit_options: list = []
 
     def edit_message_text(self, chat_id, message_id, text, options=None):
         self.edits.append(text)
+        self.edit_options.append(options)
         return True
 
 
@@ -126,6 +128,19 @@ class TestReveal(unittest.TestCase):
         self.assertEqual(tg.edits, ['Привет мир'])
         self.assertEqual(effects.get_final_text(content), 'Привет мир')
         self.assertEqual(effects.get_initial_text(content), 'Привет')
+
+    def test_edits_carry_reply_markup(self):
+        # Без reply_markup в editMessageText Telegram снимает инлайн-клавиатуру.
+        tg = FakeTG()
+        opts = {'reply_markup': {'inline_keyboard': [[{'text': 'ok'}]]}}
+        with mock.patch.object(effects.time, 'sleep'):
+            ok = effects.process_effects(
+                tg, 1, 1, '<effect:countdown>1|2</effect>',
+                edit_options=opts)
+        self.assertTrue(ok)
+        self.assertTrue(tg.edit_options, 'ожидались правки')
+        self.assertTrue(all(o is opts for o in tg.edit_options),
+                        'каждая правка должна нести reply_markup')
 
     def test_cum_final_equals_source_text(self):
         # Финал cum-режима совпадает с исходом побуквенно (без \n).
