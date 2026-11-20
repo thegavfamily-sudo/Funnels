@@ -183,6 +183,16 @@ def handle_command(ctx: BotContext, chat_id, user_id: Any, command: str) -> None
 
     if cmd.startswith('/start'):
         referral_link: Optional[str] = None
+        # Метка источника: '/start src_ads1' → referral_source;
+        # креатив: '/start src_ads1--video1' → + referral_creative.
+        source_code, creative_code = \
+            users.ReferralManager.extract_source_codes_from_start_command(
+                command)
+        source_data = {}
+        if source_code:
+            source_data['referral_source'] = source_code
+        if creative_code:
+            source_data['referral_creative'] = creative_code
 
         if ctx.config.get('referral', True):
             referrer_id = users.ReferralManager.extract_referrer_id_from_start_command(
@@ -195,7 +205,7 @@ def handle_command(ctx: BotContext, chat_id, user_id: Any, command: str) -> None
                     referral_link = users.ReferralManager.generate_referral_link(
                         ctx, referrer_id)
 
-        users.upsert_user(ctx, {'id': user_id}, 1, {}, referral_link)
+        users.upsert_user(ctx, {'id': user_id}, 1, source_data, referral_link)
         users.set_user_state(ctx, user_id, 1)
         steps.send_step_message(ctx, chat_id, 1, user_id)
         return
@@ -253,6 +263,16 @@ def handle_message(ctx: BotContext, message: dict) -> None:
         current_step = users.get_user_state(ctx, user_id)
 
         referral_link: Optional[str] = None
+        # Метка источника: '/start src_ads1' → referral_source;
+        # креатив: '/start src_ads1--video1' → + referral_creative.
+        source_code, creative_code = \
+            users.ReferralManager.extract_source_codes_from_start_command(
+                text)
+        source_data = {}
+        if source_code:
+            source_data['referral_source'] = source_code
+        if creative_code:
+            source_data['referral_creative'] = creative_code
         if text.startswith('/start') and ctx.config.get('referral', True):
             referrer_id = users.ReferralManager.extract_referrer_id_from_start_command(
                 text)
@@ -262,7 +282,7 @@ def handle_message(ctx: BotContext, message: dict) -> None:
                 if referrer_info and referrer_info.get('referral_link'):
                     referral_link = referrer_info['referral_link']
 
-        users.upsert_user(ctx, user, current_step, {}, referral_link)
+        users.upsert_user(ctx, user, current_step, source_data, referral_link)
 
         if text.startswith('/start'):
             users.set_user_state(ctx, user_id, 1)

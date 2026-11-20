@@ -19,6 +19,7 @@ from keyboards import (extract_callback_params,  # noqa: E402
 from steps import get_slot_symbols, normalize_type_value, parse_poll_data, \
     parse_quiz_data  # noqa: E402
 from storage import parse_bot_flags  # noqa: E402
+import users  # noqa: E402
 
 
 class TestParseRegularKeyboardData(unittest.TestCase):
@@ -335,6 +336,46 @@ class TestExtractCallbackParams(unittest.TestCase):
             self.assertEqual(params['functionId'], 'fn')
             self.assertEqual(params['row'], '2')
             self.assertEqual(params['action'], 'remove')
+
+
+class TestExtractSourceCodes(unittest.TestCase):
+    """extract_source_codes_from_start_command: src_ и src_--creative."""
+
+    def test_source_only(self):
+        self.assertEqual(
+            users.ReferralManager.extract_source_codes_from_start_command(
+                '/start src_ads1'),
+            ('ads1', None))
+
+    def test_source_and_creative(self):
+        self.assertEqual(
+            users.ReferralManager.extract_source_codes_from_start_command(
+                '/start src_insta--video1'),
+            ('insta', 'video1'))
+
+    def test_no_param(self):
+        self.assertEqual(
+            users.ReferralManager.extract_source_codes_from_start_command(
+                '/start'),
+            (None, None))
+
+    def test_referral_param_not_source(self):
+        self.assertEqual(
+            users.ReferralManager.extract_source_codes_from_start_command(
+                '/start ref_123'),
+            (None, None))
+
+    def test_plain_text(self):
+        self.assertEqual(
+            users.ReferralManager.extract_source_codes_from_start_command(
+                'привет'),
+            (None, None))
+
+    def test_empty_payload(self):
+        self.assertEqual(
+            users.ReferralManager.extract_source_codes_from_start_command(
+                '/start src_'),
+            (None, None))
 
 
 if __name__ == '__main__':

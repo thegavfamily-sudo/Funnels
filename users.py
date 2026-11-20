@@ -110,6 +110,35 @@ class ReferralManager:
             return None
 
     @staticmethod
+    def extract_source_codes_from_start_command(
+            text: Any) -> tuple[Optional[str], Optional[str]]:
+        """'/start src_ads1' → ('ads1', None);
+        '/start src_ads1--video1' → ('ads1', 'video1').
+
+        Ссылки источников и креативов генерирует админка
+        (funnel_sources_screen.dart):
+        https://t.me/{bot}?start=src_{code} или src_{code}--{creative}.
+        """
+        try:
+            if not text or not isinstance(text, str) or not text.startswith('/start'):
+                return None, None
+            parts = text.split()
+            if len(parts) < 2:
+                return None, None
+            param = parts[1].strip()
+            if not param.startswith('src_'):
+                return None, None
+            payload = param[4:]
+            if not payload:
+                return None, None
+            if '--' in payload:
+                source, creative = payload.split('--', 1)
+                return (source or None), (creative or None)
+            return payload, None
+        except Exception:  # noqa: BLE001
+            return None, None
+
+    @staticmethod
     def find_referrer_by_link(ctx: BotContext, referral_link: Any) -> Optional[dict]:
         """Поиск по data->>referral_link в funnel_users текущей воронки."""
         try:
