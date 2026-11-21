@@ -3,17 +3,13 @@
 
 Что нужно: Python 3.10+ и доступ в интернет.
 
-1) КЛЮЧИ (.env)
-   Файл .env лежит рядом с main.py и НЕ загружается на GitHub
-   (исключён в .gitignore). Шаблон без секретов — .env.example.
-
-   В .env должны быть:
-     SUPABASE_URL        → Project URL из Supabase (Project Settings → API):
+1) ЗАПОЛНИТЬ bot/config.py
+   - SUPABASE_URL        → Project URL из Supabase (Project Settings → API):
                             https://xxxxxxxx.supabase.co
-     SUPABASE_SERVICE_KEY → service_role (Secret) key оттуда же
-   config.py читает их автоматически при запуске.
+   - SUPABASE_SERVICE_KEY → service_role (Secret) key оттуда же
+   (анон-ключ тоже работает, но service_role правильнее для бота)
 
-2) УСТАНОВИТЬ ЗАВИСИМОСТИ (один раз, в этой папке):
+2) УСТАНОВИТЬ ЗАВИСИМОСТИ (один раз, в папке bot/):
        pip install -r requirements.txt
 
 3) ЗАПУСТИТЬ:
@@ -29,17 +25,15 @@
    - В таблице funnel_users появится строка с user_id и current_step.
 
 ГДЕ ЧТО ЛЕЖИТ:
-   .env              — ключи (только у тебя, не в git)
-   .env.example      — шаблон .env без секретов
-   config.py         — настройки и константы (без ключей)
-   supabase_client.py — клиент Supabase (PostgREST)
-   telegram_api.py   — обёртка Telegram Bot API
-   storage.py        — кэши воронок/шагов/клавиатур/юзеров
+   config.py            — ключи и интервалы синхронизации
+   supabase_client.py   — клиент Supabase (PostgREST)
+   telegram_api.py      — обёртка Telegram Bot API
+   storage.py           — кэши воронок/шагов/клавиатур/юзеров
    steps.py/handlers.py — логика шагов и обработка апдейтов
-   functions.py      — системные сообщения и формулы
-   main.py           — запуск (long polling)
+   functions.py         — системные сообщения и формулы
+   main.py              — запуск (long polling)
 
 ЕСЛИ БОТ НЕ ОТВЕЧАЕТ:
-   - Проверьте, что .env на месте и в нём нет плейсхолдеров YOUR-... / xxx.
+   - Проверьте ключи в config.py (без плейсхолдеров YOUR-...).
    - Посмотрите лог: ошибки Supabase/Telegram пишутся в консоль.
    - Воронка в статусе Archived или с выключенным cache не обслуживается.

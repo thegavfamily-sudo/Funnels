@@ -1,45 +1,21 @@
 # ============================================================================
 # config.py — подключение Python-бота к Supabase и Telegram
 #
-# Ключи НЕ хранятся в этом файле. Они читаются из переменных окружения
-# или из файла .env (лежит рядом с main.py; в git не попадает — см. .gitignore).
+# КАК ЗАПОЛНИТЬ:
+#   1) Supabase → Project Settings → API
+#   2) Project URL        → SUPABASE_URL
+#   3) service_role key   → SUPABASE_SERVICE_KEY
+#      (anon key тоже сработает — RLS в схеме выключен, но service_role
+#       правильнее для серверного скрипта)
 #
-# .env.example — шаблон без секретов. Скопируй его в .env и впиши значения:
-#   SUPABASE_URL=https://xxxxxxxx.supabase.co
-#   SUPABASE_SERVICE_KEY=sb_secret_...
+# Значения ниже — ЗАГЛУШКИ. Замени на свои перед запуском.
 # ============================================================================
 
-from __future__ import annotations
-
-import os
-from pathlib import Path
-
-# ---------------------------------------------------------------------------
-# Загрузка .env (простой парсер, без python-dotenv)
-# ---------------------------------------------------------------------------
-
-def _load_env_file(path: Path) -> None:
-    if not path.is_file():
-        return
-    for raw_line in path.read_text(encoding='utf-8').splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        key, _, value = line.partition('=')
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        # Не перетираем уже заданные переменные окружения
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
-_load_env_file(Path(__file__).resolve().parent / '.env')
-
 # URL проекта Supabase: https://xxxxxxxx.supabase.co
-SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
+SUPABASE_URL = "https://YOUR-PROJECT.supabase.co"
 
 # service_role ключ (Secret) из Project Settings → API
-SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
+SUPABASE_SERVICE_KEY = "YOUR-SERVICE-ROLE-KEY"
 
 # ---------------------------------------------------------------------------
 # Настройки бота

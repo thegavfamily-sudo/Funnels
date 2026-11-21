@@ -436,6 +436,197 @@ def execute_single_formula(formula: str, rows: list[dict], headers: list[str],
 
 
 # ---------------------------------------------------------------------------
+# calc — арифметика над тегами пользователя (coins = coins * dice)
+# ---------------------------------------------------------------------------
+
+class CalcError(Exception):
+    """Ошибка формулы calc; текст показывается как ответ бота."""
+
+
+def _calc_tokenize(expr: str) -> list[str]:
+    """Токены: числа, идентификаторы (теги/эмодзи), операторы, скобки."""
+    tokens: list[str] = []
+    i, n = 0, len(expr)
+    while i < n:
+        ch = expr[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch.isdigit() or (ch == '.' and i + 1 < n and expr[i + 1].isdigit()):
+            j = i
+            while j < n and (expr[j].isdigit() or expr[j] == '.'):
+                j += 1
+            tokens.append(expr[i:j])
+            i = j
+            continue
+        if ch in '+-*/(),=':
+            tokens.append(ch)
+            i += 1
+            continue
+        j = i
+        while (j < n and not expr[j].isspace()
+               and expr[j] not in '+-*/(),='):
+            j += 1
+        tokens.append(expr[i:j])
+        i = j
+    return tokens
+
+
+class _CalcParser:
+    """Рекурсивный спуск: expr := term ((+|-) term)* … Без eval."""
+
+    def __init__(self, tokens: list[str], tags: dict):
+        self.tokens = tokens
+        self.pos = 0
+        self.tags = tags
+
+    def peek(self) -> Optional[str]:
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else None
+
+    def next(self) -> Optional[str]:
+        tok = self.peek()
+        self.pos += 1
+        return tok
+
+    def expect(self, tok: str) -> None:
+        got = self.next()
+        if got != tok:
+            raise CalcError(f'ожидалось «{tok}», получено «{got or ""}»')
+
+    def parse(self) -> float:
+        if not self.tokens:
+            raise CalcError('пустое выражение')
+        value = self.expr()
+        if self.pos < len(self.tokens):
+            raise CalcError(
+                f'лишние символы: {" ".join(self.tokens[self.pos:])}')
+        return value
+
+    def expr(self) -> float:
+        value = self.term()
+        while self.peek() in ('+', '-'):
+            op = self.next()
+            rhs = self.term()
+            value = value + rhs if op == '+' else value - rhs
+        return value
+
+    def term(self) -> float:
+        value = self.unary()
+        while self.peek() in ('*', '/'):
+            op = self.next()
+            rhs = self.unary()
+            if op == '*':
+                value = value * rhs
+            else:
+                if rhs == 0:
+                    raise CalcError('деление на ноль')
+                value = value / rhs
+        return value
+
+    def unary(self) -> float:
+        if self.peek() == '-':
+            self.next()
+            return -self.unary()
+        if self.peek() == '+':
+            self.next()
+            return self.unary()
+        return self.primary()
+
+    def primary(self) -> float:
+        tok = self.next()
+        if tok is None:
+            raise CalcError('выражение оборвано')
+        if tok == '(':
+            value = self.expr()
+            self.expect(')')
+            return value
+        if tok in (')', ',', '+', '-', '*', '/', '='):
+            raise CalcError(f'неожиданный символ «{tok}»')
+        if tok in ('min', 'max'):
+            self.expect('(')
+            args = [self.expr()]
+            while self.peek() == ',':
+                self.next()
+                args.append(self.expr())
+            self.expect(')')
+            return min(args) if tok == 'min' else max(args)
+        try:
+            return float(tok)
+        except ValueError:
+            pass
+        if tok in self.tags:
+            return self._to_number(tok, self.tags[tok])
+        # Нет тега — стартовое значение (счётчик начинается с нуля).
+        return 0.0
+
+    @staticmethod
+    def _to_number(name: str, value: Any) -> float:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        try:
+            return float(str(value).strip().replace(',', '.'))
+        except (TypeError, ValueError):
+            raise CalcError(f'тег «{name}» не число: «{value}»')
+
+
+def evaluate_calc(expr: str, tags: dict) -> float:
+    """Вычислить выражение над тегами (без записи). Для тестов/внутреннего."""
+    return _CalcParser(_calc_tokenize(expr), tags).parse()
+
+
+def _calc_is_ident(name: str) -> bool:
+    return bool(name) and not any(
+        c.isspace() or c in '+-*/(),=' for c in name)
+
+
+def _calc_normalize(value: float) -> Any:
+    if abs(value - round(value)) < 1e-9:
+        return int(round(value))
+    return round(value, 6)
+
+
+def execute_calc_formula(ctx: BotContext, user_id: Any, formula: str,
+                         message: str) -> dict:
+    """Формула вида `coins = coins * dice`: считает, пишет тег, отвечает.
+
+    {result} в сообщении → результат; остальные {теги} подставляются
+    после записи, т.е. показывают уже новое значение.
+    """
+    try:
+        if not user_id:
+            return {'success': False,
+                    'message': '❌ Расчёт доступен только для пользователя'}
+        formula = str(formula or '').strip()
+        if not formula:
+            return {'success': False, 'message': '❌ Не указана формула'}
+        if '=' not in formula:
+            return {'success': False,
+                    'message': '❌ Формула должна быть вида: coins = coins * dice'}
+        target, expr = formula.split('=', 1)
+        target = target.strip()
+        if not _calc_is_ident(target):
+            return {'success': False,
+                    'message': f'❌ Нельзя записать результат в «{target}»'}
+
+        row = ctx.storage.get_user(ctx.funnel_id, user_id)
+        data: dict = dict(row.get('data') or {}) if row else {}
+        value = _calc_normalize(evaluate_calc(expr, data))
+        data[target] = value
+        ctx.storage.save_user_row(ctx.funnel_id, user_id,
+                                  users.get_user_state(ctx, user_id), data)
+
+        text = message or '✅ Результат: {result}'
+        text = text.replace('{result}', str(value))
+        return {'success': True,
+                'message': users.replace_tags_in_text(ctx, text, user_id)}
+    except CalcError as error:
+        return {'success': False, 'message': f'❌ {error}'}
+    except Exception as error:  # noqa: BLE001
+        logger.error('[executeCalcFormula] Error: %s', error)
+        return {'success': False, 'message': f'❌ Ошибка расчёта: {error}'}
+
+
+# ---------------------------------------------------------------------------
 # executeLogicalFormula (:5080)
 # ---------------------------------------------------------------------------
 
@@ -557,6 +748,11 @@ def execute_function(ctx: BotContext, function_name: str, user_id: Any,
         if user_id:
             message = users.replace_tags_in_text(ctx, message, user_id)
         return {'success': True, 'message': message}
+
+    if func_type == 'calc':
+        return execute_calc_formula(ctx, user_id,
+                                    func_config['function_param'],
+                                    func_config['message'])
 
     return {'success': False,
             'message': f'❌ Неизвестный тип функции: {func_type}'}

@@ -373,3 +373,95 @@ def replace_tags_in_text(ctx: BotContext, text: Any, user_id: Any) -> str:
         result = re.sub(pattern, lambda _m, v=str(tag_value): v,
                         result, flags=re.IGNORECASE)
     return result
+
+
+def save_dice_tags(ctx: BotContext, user_id: Any, dice_emoji: Any,
+                   dice_value: Any) -> None:
+    """Сохранить результат броска дайса в теги пользователя.
+
+    Теги: {dice} — значение для логики (как dice_logic_value у шага:
+    для 🎰 — номер комбинации, 0 если символы разные; иначе значение
+    Telegram), {dice_raw} — сырое значение (1..64 для 🎰), {dice_emoji} —
+    эмодзи последнего броска, {dice_<эмодзи>} — значение конкретного типа.
+    """
+    try:
+        if user_id is None:
+            return
+        emoji = str(dice_emoji or '🎲')
+        try:
+            raw = int(dice_value or 0)
+        except (TypeError, ValueError):
+            raw = 0
+
+        # Ленивый импорт: steps импортирует users на уровне модуля.
+        from steps import (are_all_symbols_same, get_same_symbol_number,
+                           get_slot_symbols)
+        if emoji == '🎰':
+            symbols = get_slot_symbols(raw)
+            value = (get_same_symbol_number(symbols)
+                     if are_all_symbols_same(symbols) else 0)
+        else:
+            value = raw
+
+        row = ctx.storage.get_user(ctx.funnel_id, user_id)
+        data: dict = dict(row.get('data') or {}) if row else {}
+        data['dice'] = value
+        data['dice_raw'] = raw
+        data['dice_emoji'] = emoji
+        data[f'dice_{emoji}'] = value
+        ctx.storage.save_user_row(ctx.funnel_id, user_id,
+                                  get_user_state(ctx, user_id), data)
+    except Exception as error:  # noqa: BLE001
+        logger.error('[saveDiceTags] Error: %s', error)
+
+
+def save_poll_tags(ctx: BotContext, user_id: Any, target: str,
+                   selected_option: Any, logic_values: Optional[list],
+                   step_data: Optional[dict] = None) -> None:
+    """Сохранить ответ на poll/quiz в теги пользователя.
+
+    Теги: {poll_answer}/{quiz_answer} — логическое значение выбранного
+    варианта, {poll_option}/{quiz_option} — номер варианта (0..),
+    {quiz_correct} — 1 правильный ответ / 0 нет (только для quiz;
+    правильный вариант берётся из конфига шага).
+    """
+    try:
+        if user_id is None:
+            return
+        try:
+            option = int(selected_option)
+        except (TypeError, ValueError):
+            return
+        if option < 0:
+            return
+
+        prefix = 'quiz' if target == 'quiz' else 'poll'
+        row = ctx.storage.get_user(ctx.funnel_id, user_id)
+        data: dict = dict(row.get('data') or {}) if row else {}
+        data[f'{prefix}_option'] = option
+
+        values = logic_values or []
+        if 0 <= option < len(values):
+            answer = values[option]
+            try:
+                data[f'{prefix}_answer'] = int(answer)
+            except (TypeError, ValueError):
+                data[f'{prefix}_answer'] = str(answer)
+        else:
+            data[f'{prefix}_answer'] = option
+
+        if target == 'quiz':
+            # Ленивый импорт: steps импортирует users на уровне модуля.
+            from steps import compose_quiz_string, parse_quiz_data
+            from storage import get_step_value
+            quiz_str = get_step_value(step_data or {}, 'quiz') or ''
+            if not str(quiz_str).strip():
+                quiz_str = compose_quiz_string(step_data or {})
+            quiz = parse_quiz_data(quiz_str) or {}
+            correct = quiz.get('correctOption', -1)
+            data['quiz_correct'] = 1 if option == correct else 0
+
+        ctx.storage.save_user_row(ctx.funnel_id, user_id,
+                                  get_user_state(ctx, user_id), data)
+    except Exception as error:  # noqa: BLE001
+        logger.error('[savePollTags] Error: %s', error)

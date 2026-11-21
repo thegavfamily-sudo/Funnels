@@ -165,11 +165,13 @@ class BotContext:
     storage: 'Storage'
     tg: Any = None                    # TelegramAPI, подставляет main.py
     bot_username: Optional[str] = None
+    menu: dict = field(default_factory=dict)  # синяя кнопка меню (menu_button*)
 
     def spec_key(self) -> tuple:
         """Ключ для решения «перезапустить ли поток бота» при refresh."""
         return (self.token, self.funnel_id,
-                tuple(sorted(self.config.items())))
+                tuple(sorted(self.config.items())),
+                tuple(sorted(self.menu.items())))
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +235,11 @@ class Storage:
                 'funnel_name': name,
                 'token': token,
                 'config': flags,
+                'menu': {
+                    'type': str(data.get('menu_button_type') or '').strip(),
+                    'value': str(data.get('menu_button') or '').strip(),
+                    'url': str(data.get('menu_button_command') or '').strip(),
+                },
             }
             logger.info('[refresh] Loaded bot %s: funnelId=%s typing=%s',
                         bot_id, funnel_id, flags['typing'])

@@ -21,6 +21,7 @@ from typing import Optional
 import config
 import handlers
 import steps
+from menu_button import apply_menu_settings
 from storage import BotContext, Storage
 from supabase_client import SupabaseClient
 from telegram_api import TelegramAPI
@@ -112,6 +113,12 @@ class BotWorker:
         self.thread.join(timeout=timeout)
 
     def _run(self) -> None:
+        # Синяя кнопка меню — применить один раз при старте потока.
+        try:
+            apply_menu_settings(self.ctx)
+        except Exception as error:  # noqa: BLE001
+            logger.error('Бот %s: menu button: %s', self.ctx.bot_id, error)
+
         offset: Optional[int] = None
         while not self._stop_event.is_set():
             try:
@@ -144,7 +151,8 @@ class BotWorker:
 
 def _spec_key(info: dict) -> tuple:
     return (info['token'], info['funnel_id'],
-            tuple(sorted((info['config'] or {}).items())))
+            tuple(sorted((info['config'] or {}).items())),
+            tuple(sorted((info.get('menu') or {}).items())))
 
 
 def build_context(storage: Storage, bot_id: str, info: dict) -> BotContext:
@@ -156,6 +164,7 @@ def build_context(storage: Storage, bot_id: str, info: dict) -> BotContext:
         config=dict(info.get('config') or {}),
         storage=storage,
         tg=TelegramAPI(info['token']),
+        menu=dict(info.get('menu') or {}),
     )
 
 
@@ -185,11 +194,10 @@ def sync_bots(storage: Storage, workers: dict[str, BotWorker]) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
-        logger.error(
-            'Не заданы SUPABASE_URL / SUPABASE_SERVICE_KEY. '
-            'Заполни файл .env (см. .env.example) и перезапусти бота.')
-        raise SystemExit(1)
+    if 'YOUR-PROJECT' in config.SUPABASE_URL or 'YOUR-' in config.SUPABASE_SERVICE_KEY:
+        logger.warning(
+            'config.py содержит ЗАГЛУШКИ Supabase — вставьте свой Project URL '
+            'и service_role ключ перед запуском.')
 
     client = SupabaseClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
     storage = Storage(client)

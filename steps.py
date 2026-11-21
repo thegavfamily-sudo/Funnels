@@ -734,6 +734,20 @@ def add_poll_result(ctx: BotContext, poll_id: str, user_id: Any, chat_id: Any,
     ctx.storage.cleanup_game_caches()
 
 
+def _run_step_calc(ctx: BotContext, chat_id: Any, user_id: Any,
+                   step_data: Optional[dict]) -> None:
+    """Формула calc из формы шага (calc_formula) — авто-расчёт после
+    броска/ответа, до отправки следующего шага. Успех не шлёт отдельное
+    сообщение (следующий шаг покажет новые теги); ошибку показываем,
+    чтобы её не было незаметно."""
+    formula = str(get_step_value(step_data or {}, 'calc_formula') or '').strip()
+    if not formula:
+        return
+    result = functions.execute_calc_formula(ctx, user_id, formula, '')
+    if not result.get('success') and result.get('message'):
+        ctx.tg.send_message(chat_id, result['message'])
+
+
 def process_dice_result(ctx: BotContext, message_id: Any) -> bool:
     """Порт DiceManager.processDiceResult (:1807)."""
     try:
@@ -750,6 +764,11 @@ def process_dice_result(ctx: BotContext, message_id: Any) -> bool:
         dice_emoji = get_step_value(step_data, 'dice') or '🎲'
         dice_logic_value = get_step_value(step_data, 'dice_logic_value') or ''
         dice_step = get_step_value(step_data, 'dice_step') or ''
+
+        # Результат броска → теги {dice}/{dice_emoji}/… для формул calc.
+        users.save_dice_tags(ctx, user_id, dice_emoji, dice_value)
+        # Формула из формы шага (calc_formula) — авто-расчёт по тегам.
+        _run_step_calc(ctx, chat_id, user_id, step_data)
 
         next_step = 0
         if str(dice_logic_value).strip() and str(dice_step).strip():
@@ -822,6 +841,14 @@ def process_poll_result(ctx: BotContext, poll_id: str, target: str = 'poll') -> 
         step_number = poll_result['stepNumber']
         logic_values = poll_result.get('logicValues') or []
         steps = poll_result.get('steps') or []
+
+        # Ответ poll/quiz → теги {poll_answer}/{quiz_correct}/… для формул calc.
+        users.save_poll_tags(ctx, poll_result['userId'], target,
+                             selected_option, logic_values,
+                             poll_result.get('stepData') or {})
+        # Формула из формы шага (calc_formula) — авто-расчёт по тегам.
+        _run_step_calc(ctx, poll_result['chatId'], poll_result['userId'],
+                       poll_result.get('stepData') or {})
 
         next_step = 0
         if logic_values and steps:
