@@ -88,6 +88,13 @@ class TestExecuteCalcFormula(unittest.TestCase):
         self.assertEqual(ctx.storage.row['data']['coins'], 800)
         self.assertEqual(ctx.storage.row['current_step'], 7)
 
+    def test_no_message_is_silent(self):
+        ctx = _FakeCtx({'coins': 200}, step=7)
+        result = execute_calc_formula(ctx, 111, 'coins = coins * 2', '')
+        self.assertTrue(result['success'])
+        self.assertEqual(result['message'], '')
+        self.assertEqual(ctx.storage.row['data']['coins'], 400)
+
     def test_missing_formula(self):
         result = execute_calc_formula(_FakeCtx(), 111, '', '')
         self.assertFalse(result['success'])

@@ -534,28 +534,6 @@ def handle_callback_query(ctx: BotContext, callback_query: dict) -> None:
             ctx.tg.answer_callback_query(query_id)
             callback_processed = True
 
-        # -- system_/custom_/builtin_/logical_: вызов функции ---------------
-        elif any(data.startswith(config.CALLBACK_PREFIXES[prefix])
-                 for prefix in ('system', 'custom', 'builtin', 'logical')):
-            params = extract_callback_params(data)
-            function_id = params.get('functionId')
-            row = _int_or_0(params.get('row'))
-            col = _int_or_0(params.get('col'))
-            action = params.get('action') or 'keep'
-
-            ctx.tg.answer_callback_query(query_id, '⏳ Выполняется...', False)
-
-            result = functions.execute_function(ctx, function_id, user_id, chat_id)
-            if result.get('message'):
-                ctx.tg.send_message(chat_id, result['message'])
-
-            keyboard_data = StepManager.get_inline_keyboard_for_step(
-                ctx, current_step)
-            keyboards.process_button_action(ctx.tg, keyboard_data, chat_id,
-                                            message_id, action, row, col)
-            ctx.tg.answer_callback_query(query_id)
-            callback_processed = True
-
         if not callback_processed:
             ctx.tg.answer_callback_query(query_id)
 

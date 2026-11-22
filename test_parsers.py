@@ -329,13 +329,9 @@ class TestExtractCallbackParams(unittest.TestCase):
         params = extract_callback_params('cmd_next_row_0_col_0_action_keep')
         self.assertEqual(params['cmd'], 'next')
 
-    def test_function_prefixes(self):
-        for prefix in ('system', 'custom', 'builtin', 'logical'):
-            params = extract_callback_params(
-                f'{prefix}_fn_12_row_2_col_0_action_remove')
-            self.assertEqual(params['functionId'], 'fn')
-            self.assertEqual(params['row'], '2')
-            self.assertEqual(params['action'], 'remove')
+    def test_unknown_prefix_no_function_id(self):
+        # Легаси-префиксы (system_/custom_/builtin_) убраны.
+        self.assertEqual(extract_callback_params('custom_fn_1_row_0_col_0'), {})
 
 
 class TestExtractSourceCodes(unittest.TestCase):

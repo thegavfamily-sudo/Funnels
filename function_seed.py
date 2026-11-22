@@ -43,17 +43,6 @@ FUNCTION_SEED: list[dict[str, Any]] = [
         },
     },
     {
-        'id': 'fn_table01',
-        'funnel_id': SYSTEM_FUNNEL_ID,
-        'data': {
-            'type': 'System',
-            'function_name': 'Supabase table',
-            'message': '',
-            'condition': 'Users',
-            'function': '',
-        },
-    },
-    {
         'id': 'fn_live001',
         'funnel_id': SYSTEM_FUNNEL_ID,
         'data': {
@@ -65,17 +54,6 @@ FUNCTION_SEED: list[dict[str, Any]] = [
             ),
             'condition': '',
             'function': '',
-        },
-    },
-    {
-        'id': 'fn_act0001',
-        'funnel_id': SYSTEM_FUNNEL_ID,
-        'data': {
-            'type': 'logical',
-            'function_name': 'activitysum',
-            'message': 'Вот Ваши данные {result}',
-            'condition': 'Activity|auth|mail',
-            'function': 'sum(Caloric content, Choice="Шаги")',
         },
     },
 ]

@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # CONFIG.INLINE_BUTTON_TYPES (в оригинале списки различаются).
 _INLINE_PARSE_TYPES = (
     'callback', 'url', 'web app', 'switch inline', 'check channel',
-    'command', 'system', 'custom', 'builtin', 'logical',
+    'command',
 )
 
 
@@ -319,26 +319,6 @@ def build_inline_keyboard_from_parsed_data(parsed_data: Optional[dict],
                               'callback_data': (
                                   f'cmd_{cmd_value}_row_{row_index}'
                                   f'_col_{col_index}_action_{action}')}
-                elif button_type == 'system':
-                    button = {'text': button_text,
-                              'callback_data': (
-                                  f"{config.CALLBACK_PREFIXES['system']}{step_number}"
-                                  f'_row_{row_index}_col_{col_index}_action_{action}')}
-                elif button_type == 'custom':
-                    button = {'text': button_text,
-                              'callback_data': (
-                                  f"{config.CALLBACK_PREFIXES['custom']}{step_number}"
-                                  f'_row_{row_index}_col_{col_index}_action_{action}')}
-                elif button_type == 'builtin':
-                    button = {'text': button_text,
-                              'callback_data': (
-                                  f"{config.CALLBACK_PREFIXES['builtin']}{step_number}"
-                                  f'_row_{row_index}_col_{col_index}_action_{action}')}
-                elif button_type == 'logical':
-                    button = {'text': button_text,
-                              'callback_data': (
-                                  f"{config.CALLBACK_PREFIXES['logical']}{step_number}"
-                                  f'_row_{row_index}_col_{col_index}_action_{action}')}
                 else:  # callback / default
                     button = {'text': button_text,
                               'callback_data': (
@@ -422,22 +402,6 @@ def extract_callback_params(callback_data: str) -> dict:
                 params['action'] = parts[i + 1]
             elif i == 0:
                 params['cmd'] = part
-
-    else:
-        for prefix_key in ('system', 'custom', 'builtin', 'logical'):
-            prefix = config.CALLBACK_PREFIXES[prefix_key]
-            if callback_data.startswith(prefix):
-                data_without_prefix = callback_data[len(prefix):]
-                parts = data_without_prefix.split('_')
-                params['functionId'] = parts[0] if parts else ''
-                for i in range(1, len(parts)):
-                    if parts[i] == 'row' and i + 1 < len(parts):
-                        params['row'] = parts[i + 1]
-                    elif parts[i] == 'col' and i + 1 < len(parts):
-                        params['col'] = parts[i + 1]
-                    elif parts[i] == 'action' and i + 1 < len(parts):
-                        params['action'] = parts[i + 1]
-                break
 
     return params
 

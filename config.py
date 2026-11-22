@@ -72,7 +72,6 @@ SYSTEM_MESSAGE_FINAL = 'Funnel final message'
 
 INLINE_BUTTON_TYPES = {
     'callback', 'url', 'web app', 'switch inline', 'check channel',
-    'system', 'custom', 'builtin', 'logical',
 }
 
 INLINE_KEYBOARD_METHODS = {'step by step', 'update step'}
@@ -81,10 +80,6 @@ CALLBACK_PREFIXES = {
     'check_sub': 'check_sub_',
     'step': 'step_',
     'cmd': 'cmd_',
-    'system': 'system_',
-    'custom': 'custom_',
-    'builtin': 'builtin_',
-    'logical': 'logical_',
 }
 
 USERS_FIXED_COLUMNS = [
