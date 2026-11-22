@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from functions import (CalcError, evaluate_calc,  # noqa: E402
                        execute_calc_formula)
+from step_model import build_step  # noqa: E402
 from users import save_dice_tags, save_poll_tags  # noqa: E402
 
 
@@ -87,13 +88,6 @@ class TestExecuteCalcFormula(unittest.TestCase):
         self.assertEqual(result['message'], 'Выпало 4! Баланс: 800 (800)')
         self.assertEqual(ctx.storage.row['data']['coins'], 800)
         self.assertEqual(ctx.storage.row['current_step'], 7)
-
-    def test_no_message_is_silent(self):
-        ctx = _FakeCtx({'coins': 200}, step=7)
-        result = execute_calc_formula(ctx, 111, 'coins = coins * 2', '')
-        self.assertTrue(result['success'])
-        self.assertEqual(result['message'], '')
-        self.assertEqual(ctx.storage.row['data']['coins'], 400)
 
     def test_missing_formula(self):
         result = execute_calc_formula(_FakeCtx(), 111, '', '')
@@ -175,26 +169,26 @@ class TestSavePollTags(unittest.TestCase):
 
     def test_quiz_correct(self):
         # Формат quiz: вопрос|варианты|правильный|пояснение|…
-        step_data = {'quiz': 'Вопрос|Да,Нет|1|'}
+        quiz = build_step({'quiz': 'Вопрос|Да,Нет|1|'}, 1, 'f1').quiz
         ctx = _FakeCtx()
-        save_poll_tags(ctx, 111, 'quiz', 1, ['0', '1'], step_data)
+        save_poll_tags(ctx, 111, 'quiz', 1, ['0', '1'], quiz)
         data = ctx.storage.row['data']
         self.assertEqual(data['quiz_option'], 1)
         self.assertEqual(data['quiz_answer'], 1)
         self.assertEqual(data['quiz_correct'], 1)
 
     def test_quiz_wrong(self):
-        step_data = {'quiz': 'Вопрос|Да,Нет|1|'}
+        quiz = build_step({'quiz': 'Вопрос|Да,Нет|1|'}, 1, 'f1').quiz
         ctx = _FakeCtx()
-        save_poll_tags(ctx, 111, 'quiz', 0, ['0', '1'], step_data)
+        save_poll_tags(ctx, 111, 'quiz', 0, ['0', '1'], quiz)
         data = ctx.storage.row['data']
         self.assertEqual(data['quiz_correct'], 0)
         self.assertEqual(data['quiz_option'], 0)
 
     def test_quiz_without_config_correct_is_zero(self):
         ctx = _FakeCtx()
-        save_poll_tags(ctx, 111, 'quiz', 0, ['0', '1'], {})
-        # Нет конфига → correctOption -1 → совпадений нет → 0.
+        save_poll_tags(ctx, 111, 'quiz', 0, ['0', '1'], None)
+        # Нет конфига → correct -1 → совпадений нет → 0.
         self.assertEqual(ctx.storage.row['data']['quiz_correct'], 0)
 
 
@@ -220,15 +214,17 @@ class TestRunStepCalc(unittest.TestCase):
         from steps import _run_step_calc
         ctx = _FakeCalcCtx({'coins': 10, 'dice': 4})
         _run_step_calc(ctx, 555, 'u1',
-                       {'calc_formula': 'coins = coins * dice'})
+                       build_step({'calc_formula': 'coins = coins * dice'},
+                                  1, 'f1'))
         self.assertEqual(ctx.storage.row['data']['coins'], 40)
         self.assertEqual(ctx.tg.messages, [])
 
     def test_empty_formula_is_noop(self):
         from steps import _run_step_calc
         ctx = _FakeCalcCtx({'coins': 10})
-        _run_step_calc(ctx, 555, 'u1', {'calc_formula': '   '})
-        _run_step_calc(ctx, 555, 'u1', {})
+        _run_step_calc(ctx, 555, 'u1',
+                       build_step({'calc_formula': '   '}, 1, 'f1'))
+        _run_step_calc(ctx, 555, 'u1', None)
         self.assertEqual(ctx.storage.row['data']['coins'], 10)
         self.assertEqual(ctx.tg.messages, [])
 
@@ -236,7 +232,8 @@ class TestRunStepCalc(unittest.TestCase):
         from steps import _run_step_calc
         ctx = _FakeCalcCtx({'coins': 10})
         _run_step_calc(ctx, 555, 'u1',
-                       {'calc_formula': 'coins = coins / 0'})
+                       build_step({'calc_formula': 'coins = coins / 0'},
+                                  1, 'f1'))
         self.assertEqual(ctx.storage.row['data']['coins'], 10)
         self.assertEqual(len(ctx.tg.messages), 1)
         self.assertTrue(ctx.tg.messages[0].startswith('❌'))

@@ -22,6 +22,7 @@ import re
 from typing import Any, Optional
 
 import config
+from step_model import QuizConfig
 from storage import BotContext, format_sheet_date, iso_now
 
 logger = logging.getLogger(__name__)
@@ -417,13 +418,13 @@ def save_dice_tags(ctx: BotContext, user_id: Any, dice_emoji: Any,
 
 def save_poll_tags(ctx: BotContext, user_id: Any, target: str,
                    selected_option: Any, logic_values: Optional[list],
-                   step_data: Optional[dict] = None) -> None:
+                   quiz: Optional[QuizConfig] = None) -> None:
     """Сохранить ответ на poll/quiz в теги пользователя.
 
     Теги: {poll_answer}/{quiz_answer} — логическое значение выбранного
     варианта, {poll_option}/{quiz_option} — номер варианта (0..),
     {quiz_correct} — 1 правильный ответ / 0 нет (только для quiz;
-    правильный вариант берётся из конфига шага).
+    правильный вариант берётся из QuizConfig шага).
     """
     try:
         if user_id is None:
@@ -451,14 +452,7 @@ def save_poll_tags(ctx: BotContext, user_id: Any, target: str,
             data[f'{prefix}_answer'] = option
 
         if target == 'quiz':
-            # Ленивый импорт: steps импортирует users на уровне модуля.
-            from steps import compose_quiz_string, parse_quiz_data
-            from storage import get_step_value
-            quiz_str = get_step_value(step_data or {}, 'quiz') or ''
-            if not str(quiz_str).strip():
-                quiz_str = compose_quiz_string(step_data or {})
-            quiz = parse_quiz_data(quiz_str) or {}
-            correct = quiz.get('correctOption', -1)
+            correct = quiz.correct_option if quiz is not None else -1
             data['quiz_correct'] = 1 if option == correct else 0
 
         ctx.storage.save_user_row(ctx.funnel_id, user_id,

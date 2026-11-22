@@ -16,8 +16,9 @@ from keyboards import (extract_callback_params,  # noqa: E402
                        build_inline_keyboard_from_parsed_data,
                        parse_inline_keyboard_data,
                        parse_regular_keyboard_data)
-from steps import get_slot_symbols, normalize_type_value, parse_poll_data, \
-    parse_quiz_data  # noqa: E402
+from step_model import (normalize_type_value,  # noqa: E402
+                        parse_poll_data, parse_quiz_data)
+from steps import get_slot_symbols  # noqa: E402
 from storage import is_funnel_served, parse_bot_flags  # noqa: E402
 import users  # noqa: E402
 

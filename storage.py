@@ -7,12 +7,10 @@
 #   saveresponses/savestepprogress/systemmessages
 #   cacheActiveFunnels        :2799
 #   cacheStepsForActiveFunnels:2894
-#   cacheReplyKeyboards       :2976
-#   cacheInlineKeyboards      :3449
 #   cacheSystemMessages       :3528
-#   Utils.getStepValue        :795
-#   Utils.cleanFileId         :1406
-#   Utils.normalizeColumnKey  :748
+#
+# Шаги индексируются в Step (step_model.build_step): строки старой
+# таблицы парсятся один раз при загрузке, кэш steps_cache хранит объекты.
 #
 # Вместо ScriptProperties — только память; refresh() перечитывает всё
 # целиком (периодически зовёт main.py).
@@ -29,8 +27,8 @@ from datetime import datetime
 from typing import Any, Optional
 
 import config
-import keyboards
 from function_seed import merge_function_seeds
+from step_model import Step, build_step, parse_step_number
 from supabase_client import SupabaseClient
 
 logger = logging.getLogger(__name__)
@@ -91,38 +89,6 @@ def extract_bot_id_from_token(token: Any) -> str:
     return match.group(1) if match else ''
 
 
-def normalize_column_key(header: Any) -> str:
-    """lowercase, всё кроме [a-z0-9_] → '_' (Utils.normalizeColumnKey :748)."""
-    if not header:
-        return ''
-    return re.sub(r'[^a-z0-9_]', '_', str(header).lower().strip())
-
-
-def get_step_value(step_data: Optional[dict], column_name: str) -> Any:
-    """Порт Utils.getStepValue: точное имя → normalized → скан по normalized."""
-    if not step_data:
-        return ''
-    if column_name in step_data and step_data[column_name] is not None:
-        return step_data[column_name]
-    normalized = normalize_column_key(column_name)
-    if normalized in step_data and step_data[normalized] is not None:
-        return step_data[normalized]
-    for key, value in step_data.items():
-        if normalize_column_key(key) == normalized and value is not None:
-            return value
-    return ''
-
-
-def clean_file_id(file_id: Any) -> Any:
-    """Порт Utils.cleanFileId: срезает 'File ID:' и подобные префиксы."""
-    if not file_id or not isinstance(file_id, str):
-        return file_id
-    cleaned = file_id.strip()
-    for pattern in (r'^File ID:\s*', r'^File id:\s*', r'^file_id:\s*', r'^ID:\s*'):
-        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
-    return cleaned.strip()
-
-
 def format_sheet_date(date: Optional[datetime] = None) -> str:
     """Формат старой Google-таблицы: YYYY-MM-DD HH:MM:SS (Utils :1061)."""
     dt = date or datetime.now()
@@ -151,64 +117,29 @@ def is_funnel_served(funnel_row: dict) -> bool:
 
 
 def build_step_entry(row: dict) -> Optional[tuple]:
-    """(funnel_id, step_number, step_data, reply_kb, inline_kb) для строки steps.
+    """(funnel_id, step_number, Step) для строки steps.
 
     Одна индексация используется и refresh (наполнение кэшей), и режимом
     Inactive (прямое чтение таблицы шагов). None — строка не проходит.
+
+    Здесь старая табличная строка ОДИН РАЗ конвертируется в Step
+    (step_model.build_step): тип, переходы, опрос/квиз/кости/QR и
+    клавиатуры разбираются при загрузке, а не при каждой отправке.
     """
-    step_data = dict(row.get('data') or {})
-    row_funnel_id = str(row.get('funnel_id') or '').strip() or \
-        str(step_data.get('funnel_id') or '').strip()
-    if not row_funnel_id:
+    data = dict(row.get('data') or {})
+    funnel_id = str(row.get('funnel_id') or '').strip() or \
+        str(data.get('funnel_id') or '').strip()
+    if not funnel_id:
         return None
 
     step_value = row.get('step')
     if step_value is None or step_value == '':
-        step_value = step_data.get('step')
+        step_value = data.get('step')
     step_number = parse_step_number(step_value)
     if step_number is None or step_number <= 0:
         return None
 
-    file_id = step_data.get('file_id')
-    if isinstance(file_id, str):
-        step_data['file_id'] = clean_file_id(file_id)
-    step_data['step'] = step_number
-    step_data['funnel_id'] = row_funnel_id
-
-    # Reply keyboard (cacheReplyKeyboards :2976)
-    reply_kb = None
-    keyboard_str = get_step_value(step_data, 'regular_keyboard')
-    if keyboard_str and str(keyboard_str).strip():
-        parsed = keyboards.parse_regular_keyboard_data(keyboard_str)
-        if parsed and parsed['buttons']:
-            reply_kb = {
-                'parsedData': parsed,
-                'step': step_number,
-                'funnelId': row_funnel_id,
-            }
-
-    # Inline keyboard (cacheInlineKeyboards :3449)
-    inline_kb = None
-    inline_str = get_step_value(step_data, 'inline_keyboard')
-    if inline_str and str(inline_str).strip():
-        channel = get_step_value(step_data, 'channel')
-        subscription = get_step_value(step_data, 'subscription')
-        no_subscription = get_step_value(step_data, 'no_subscription')
-        parsed = keyboards.parse_inline_keyboard_data(inline_str)
-        if parsed and parsed['buttons']:
-            built = keyboards.build_inline_keyboard_from_parsed_data(
-                parsed, channel)
-            inline_kb = {
-                'inlineKeyboard': built,
-                'step': step_number,
-                'funnelId': row_funnel_id,
-                'channel': channel or '',
-                'subscriptionMessage': subscription or '',
-                'noSubscriptionMessage': no_subscription or '',
-                'parsedData': parsed,
-            }
-
-    return row_funnel_id, step_number, step_data, reply_kb, inline_kb
+    return funnel_id, step_number, build_step(data, step_number, funnel_id)
 
 
 def system_messages_from(entries: list) -> dict:
@@ -271,9 +202,7 @@ class Storage:
 
         # Табличные кэши (перестраиваются в refresh)
         self.active_funnels: dict[str, dict] = {}       # bot_id → {…}
-        self.steps_cache: dict[str, dict] = {}          # "funnel_step" → stepData
-        self.reply_keyboards_cache: dict[str, dict] = {}
-        self.inline_keyboards_cache: dict[str, dict] = {}
+        self.steps_cache: dict[str, Step] = {}          # "funnel_step" → Step
         self.system_messages_cache: dict[str, str] = {}
         self.funnel_names: dict[str, str] = {}          # funnel_id → name
         self.functions_rows: list[dict] = []            # {id, funnel_id, data}
@@ -340,23 +269,16 @@ class Storage:
             steps_rows = []
 
         active_funnel_ids = {info['funnel_id'] for info in active.values()}
-        steps_cache: dict[str, dict] = {}
-        reply_keyboards: dict[str, dict] = {}
-        inline_keyboards: dict[str, dict] = {}
+        steps_cache: dict[str, 'Step'] = {}
 
         for row in steps_rows:
             entry = build_step_entry(row)
             if entry is None:
                 continue
-            row_funnel_id, step_number, step_data, reply_kb, inline_kb = entry
+            row_funnel_id, step_number, step = entry
             if row_funnel_id not in active_funnel_ids:
                 continue
-            cache_key = f'{row_funnel_id}_{step_number}'
-            steps_cache[cache_key] = step_data
-            if reply_kb is not None:
-                reply_keyboards[cache_key] = reply_kb
-            if inline_kb is not None:
-                inline_keyboards[cache_key] = inline_kb
+            steps_cache[f'{row_funnel_id}_{step_number}'] = step
 
         # Functions + системные сообщения (cacheSystemMessages :3528)
         try:
@@ -382,8 +304,6 @@ class Storage:
         with self._lock:
             self.active_funnels = active
             self.steps_cache = steps_cache
-            self.reply_keyboards_cache = reply_keyboards
-            self.inline_keyboards_cache = inline_keyboards
             self.system_messages_cache = system_messages
             self.funnel_names = funnel_names
             self.functions_rows = normalized_functions
@@ -391,9 +311,8 @@ class Storage:
             self.cache_timestamp = time.time()
 
         self.cleanup_game_caches()
-        logger.info('[refresh] %d bots, %d steps, %d keyboards, %d system messages',
-                    len(active), len(steps_cache), len(reply_keyboards) + len(inline_keyboards),
-                    len(system_messages))
+        logger.info('[refresh] %d bots, %d steps, %d system messages',
+                    len(active), len(steps_cache), len(system_messages))
 
     # -- accessors ----------------------------------------------------------
 
@@ -403,14 +322,8 @@ class Storage:
     def get_funnel_name(self, funnel_id: str) -> str:
         return self.funnel_names.get(funnel_id, f'Funnel {funnel_id}')
 
-    def get_step(self, funnel_id: str, step_number: int) -> Optional[dict]:
+    def get_step(self, funnel_id: str, step_number: int) -> Optional[Step]:
         return self.steps_cache.get(f'{funnel_id}_{step_number}')
-
-    def get_reply_keyboard(self, funnel_id: str, step_number: int) -> Optional[dict]:
-        return self.reply_keyboards_cache.get(f'{funnel_id}_{step_number}')
-
-    def get_inline_keyboard(self, funnel_id: str, step_number: int) -> Optional[dict]:
-        return self.inline_keyboards_cache.get(f'{funnel_id}_{step_number}')
 
     def get_system_message(self, funnel_id: str, message_type: str) -> str:
         cached = self.system_messages_cache.get(f'{funnel_id}_{message_type}')
@@ -456,22 +369,15 @@ class Storage:
             return
 
         prefix = f'{funnel_id}_'
-        new_steps: dict[str, dict] = {}
-        new_reply: dict[str, dict] = {}
-        new_inline: dict[str, dict] = {}
+        new_steps: dict[str, Step] = {}
         for row in steps_rows:
             entry = build_step_entry(row)
             if entry is None:
                 continue
-            row_fid, step_number, step_data, reply_kb, inline_kb = entry
+            row_fid, step_number, step = entry
             if row_fid != funnel_id:
                 continue
-            key = f'{row_fid}_{step_number}'
-            new_steps[key] = step_data
-            if reply_kb is not None:
-                new_reply[key] = reply_kb
-            if inline_kb is not None:
-                new_inline[key] = inline_kb
+            new_steps[f'{row_fid}_{step_number}'] = step
 
         new_functions = [{
             'id': str(row.get('id') or ''),
@@ -486,10 +392,6 @@ class Storage:
 
         with self._lock:
             self.steps_cache = {**without_funnel(self.steps_cache), **new_steps}
-            self.reply_keyboards_cache = {
-                **without_funnel(self.reply_keyboards_cache), **new_reply}
-            self.inline_keyboards_cache = {
-                **without_funnel(self.inline_keyboards_cache), **new_inline}
             self.system_messages_cache = {
                 **without_funnel(self.system_messages_cache), **new_messages}
             self.functions_rows = [
@@ -564,39 +466,3 @@ class Storage:
             self._cleanup(self.dice_results, now_ms)
             self._cleanup(self.poll_results, now_ms)
             self._cleanup(self.quiz_results, now_ms)
-
-
-# ---------------------------------------------------------------------------
-# Порт Utils.parseStepNumber (:255)
-# ---------------------------------------------------------------------------
-
-def parse_step_number(step_value: Any) -> Optional[int]:
-    """Порт Utils.parseStepNumber (:255): parseInt-семантика."""
-    if step_value is None or isinstance(step_value, bool):
-        return None
-    if isinstance(step_value, (int, float)):
-        return int(step_value)
-    text = str(step_value).strip()
-    if not text:
-        return None
-    if ',' in text:
-        text = text.replace(',', '.', 1).split('.')[0]
-    match = re.match(r'^[+-]?\d+', text)
-    return int(match.group(0)) if match else None
-
-
-def parse_delay(delay_value: Any) -> float:
-    """Порт Utils.getDelay (:222): секунды, запятая→точка, иначе 0."""
-    if delay_value is None:
-        return 0
-    text = str(delay_value).strip()
-    if not text:
-        return 0
-    try:
-        delay = float(text.replace(',', '.'))
-    except ValueError:
-        match = re.match(r'^-?\d+(?:\.\d+)?', text)
-        if not match:
-            return 0
-        delay = float(match.group(0))
-    return delay if delay > 0 else 0

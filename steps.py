@@ -2,14 +2,20 @@
 # steps.py — StepManager + sendStepMessage/updateStepMessage + медиа/баркод/
 #            опросы/кости
 #
+# Вся работа с шагами идёт через step_model.Step (типизированные поля):
+# строки старой таблицы парсятся ОДИН РАЗ при загрузке воронки
+# (storage.build_step_entry → step_model.build_step), send-time не парсит.
+#
 # Порты из apps_script/БОТ_готовый.gs:
-#   Utils.normalizeTypeValue :280   Utils.parsePollData :2605
-#   Utils.parseQuizData      :2659  Utils слоты/кости    :451-565
-#   Utils barcode/QR         :1120-1381
-#   StepManager              :3609  MessageHandler.sendStepMessage :5503
-#   updateStepMessage        :5664  sendMediaMessage :4244
-#   sendBarcodeMessage       :4439  Poll/Quiz/Dice managers :1730-2121
-#   completeFunnel           :6218
+#   Utils слоты/кости            :451-565
+#   Utils barcode/QR             :1120-1381
+#   StepManager                  :3609
+#   sendMediaMessage             :4244
+#   sendBarcodeMessage           :4439
+#   Poll/Quiz/Dice managers      :1730-2121
+#   MessageHandler.sendStepMessage :5503
+#   updateStepMessage            :5664
+#   completeFunnel               :6218
 # ============================================================================
 
 from __future__ import annotations
@@ -17,302 +23,24 @@ from __future__ import annotations
 import base64
 import logging
 import random
-import re
 import threading
 import time
-from datetime import datetime, timezone
 from typing import Any, Optional
-from urllib.parse import urlparse
 
 import config
 import effects
 import functions
 import keyboards
-import subscription
 import users
-from storage import (BotContext, clean_file_id, get_step_value,
-                     parse_delay, parse_step_number)
+from step_model import (Step, valid_http_url)
+from storage import BotContext
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Нормализация типов шагов (Utils.normalizeTypeValue :280)
-# ---------------------------------------------------------------------------
-
-_TYPE_MAPPING = {
-    'photo': 'photo',
-    'video': 'video',
-    'audio': 'audio',
-    'voice': 'voice',
-    'document': 'document',
-    'video note': 'video_note',
-    'video_note': 'video_note',
-    'animation': 'animation',
-    'sticker': 'sticker',
-    'media group': 'media_group',
-    'media_group': 'media_group',
-    'poll': 'poll',
-    'quiz': 'quiz',
-    'dice': 'dice',
-    'barcode': 'barcode',
-    'qr': 'barcode',
-    'qr code': 'barcode',
-    'qr-code': 'barcode',
-    'text': 'text',
-    'input': 'input',
-}
-
-
-def normalize_type_value(type_value: Any) -> str:
-    if not type_value:
-        return ''
-    # re.ASCII: как в JS \w — только [A-Za-z0-9_] (кириллица вырезается)
-    clean = re.sub(r'[^\w\s]', '', str(type_value), flags=re.ASCII)
-    clean = re.sub(r'\s+', ' ', clean).strip().lower()
-    if clean in _TYPE_MAPPING:
-        return _TYPE_MAPPING[clean]
-    for key, value in _TYPE_MAPPING.items():
-        if key in clean:
-            return value
-    return clean
-
-
-def is_media_type(type_value: Any) -> bool:
-    if not type_value:
-        return False
-    return normalize_type_value(type_value) in config.MEDIA_TYPES
-
-
-def is_input_type(type_value: Any) -> bool:
-    if not type_value:
-        return False
-    return normalize_type_value(type_value) == 'input'
-
 
 # ---------------------------------------------------------------------------
-# Poll / Quiz (parsePollData :2605 / parseQuizData :2659)
+# Кости / слоты: рантайм значения броска (конфиг ветвления — в Step.dice)
 # ---------------------------------------------------------------------------
-
-_TRUE_VALUES = ('true', '1', 'да', 'yes', 'on')
-
-
-def _parse_int_leading(value: str) -> Optional[int]:
-    """Аналог JS parseInt: ведущее целое, иначе None (NaN)."""
-    match = re.match(r'^\s*([+-]?\d+)', str(value))
-    return int(match.group(1)) if match else None
-
-
-def _parse_int_list(text: str) -> Optional[list[int]]:
-    """Список parseInt-значений; если хотя бы одно NaN → None (как every(!isNaN))."""
-    values = []
-    for part in text.split(','):
-        parsed = _parse_int_leading(part.strip())
-        if parsed is None:
-            return None
-        values.append(parsed)
-    return values
-
-
-def parse_poll_data(poll_str: Any) -> Optional[dict]:
-    try:
-        if not poll_str or str(poll_str).strip() == '':
-            return None
-
-        parts = [p.strip() for p in str(poll_str).split('|')]
-        result = {
-            'question': parts[0] if parts and parts[0] else 'Вопрос',
-            'answers': [],
-            'multiple': False,
-            'anonymous': True,
-            'logicValues': [],
-            'steps': [],
-        }
-
-        if len(parts) > 1 and parts[1]:
-            result['answers'] = [a.strip() for a in parts[1].split(',')
-                                 if a.strip() != '']
-
-        if len(parts) > 2 and parts[2]:
-            result['multiple'] = parts[2].lower() in _TRUE_VALUES
-
-        if len(parts) > 3 and parts[3]:
-            result['anonymous'] = parts[3].lower() in _TRUE_VALUES
-
-        if len(parts) > 4 and parts[4] and parts[4].strip() != '':
-            parsed = _parse_int_list(parts[4])
-            if parsed is not None:
-                result['logicValues'] = parsed
-
-        if len(parts) > 5 and parts[5] and parts[5].strip() != '':
-            parsed = _parse_int_list(parts[5])
-            if parsed is not None:
-                result['steps'] = [v for v in parsed if v > 0]
-
-        return result
-    except Exception as error:  # noqa: BLE001
-        logger.error('[parsePollData] Error: %s', error)
-        return None
-
-
-def parse_quiz_data(quiz_str: Any) -> Optional[dict]:
-    try:
-        if not quiz_str or str(quiz_str).strip() == '':
-            return None
-
-        parts = [p.strip() for p in str(quiz_str).split('|')]
-        result = {
-            'question': parts[0] if parts and parts[0] else 'Вопрос',
-            'answers': [],
-            'correctOption': 0,
-            'explanation': '',
-            'anonymous': True,
-            'logicValues': [],
-            'steps': [],
-        }
-
-        if len(parts) > 1 and parts[1]:
-            result['answers'] = [a.strip() for a in parts[1].split(',')
-                                 if a.strip() != '']
-
-        if len(parts) > 2 and parts[2]:
-            option = _parse_int_leading(parts[2])
-            if option is not None and 0 <= option < len(result['answers']):
-                result['correctOption'] = option
-
-        if len(parts) > 3 and parts[3]:
-            result['explanation'] = parts[3]
-
-        if len(parts) > 4 and parts[4]:
-            result['anonymous'] = parts[4].lower() in _TRUE_VALUES
-
-        if len(parts) > 5 and parts[5] and parts[5].strip() != '':
-            parsed = _parse_int_list(parts[5])
-            if parsed is not None:
-                result['logicValues'] = parsed
-
-        if len(parts) > 6 and parts[6] and parts[6].strip() != '':
-            parsed = _parse_int_list(parts[6])
-            if parsed is not None:
-                result['steps'] = [v for v in parsed if v > 0]
-
-        return result
-    except Exception as error:  # noqa: BLE001
-        logger.error('[parseQuizData] Error: %s', error)
-        return None
-
-
-def _bool_col(step_data: dict, column: str) -> str:
-    """Переключатель формы → 'TRUE'/'FALSE' для эталонной строки колонки."""
-    raw = str(get_step_value(step_data, column) or '').strip().lower()
-    return 'TRUE' if raw in _TRUE_VALUES else 'FALSE'
-
-
-def compose_poll_string(step_data: dict) -> str:
-    """Строка колонки Poll из полей формы (poll_question, poll_answer, …).
-
-    Форма админки пишет раздельные ключи, а эталонный формат бота —
-    `вопрос|варианты|multiple|anonymous|logic|steps`: без этой сборки
-    опрос из формы в бот не попадает.
-    """
-    question = str(get_step_value(step_data, 'poll_question') or '').strip()
-    answers = str(get_step_value(step_data, 'poll_answer') or '').strip()
-    if not question and not answers:
-        return ''
-    return '|'.join([
-        question,
-        answers,
-        _bool_col(step_data, 'poll_multiple'),
-        _bool_col(step_data, 'poll_anonymous'),
-        str(get_step_value(step_data, 'poll_logic_value') or '').strip(),
-        str(get_step_value(step_data, 'poll_step') or '').strip(),
-    ])
-
-
-def compose_quiz_string(step_data: dict) -> str:
-    """Строка колонки Quiz из полей формы:
-    вопрос|варианты|правильный №|пояснение|аноним|logic|steps."""
-    question = str(get_step_value(step_data, 'quiz_question') or '').strip()
-    answers = str(get_step_value(step_data, 'quiz_answer') or '').strip()
-    if not question and not answers:
-        return ''
-    correct = str(get_step_value(step_data, 'quiz_option') or '').strip() or '0'
-    return '|'.join([
-        question,
-        answers,
-        correct,
-        str(get_step_value(step_data, 'quiz_explanation') or '').strip(),
-        _bool_col(step_data, 'quiz_anonymous'),
-        str(get_step_value(step_data, 'quiz_logic_value') or '').strip(),
-        str(get_step_value(step_data, 'quiz_step') or '').strip(),
-    ])
-
-
-def parse_close_date(value: Any) -> Optional[int]:
-    """close_date из формы: unix-timestamp или 'ГГГГ-ММ-ДД ЧЧ:ММ[:SS]' (UTC)."""
-    v = str(value or '').strip()
-    if not v:
-        return None
-    if v.isdigit():
-        return int(v)
-    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
-        try:
-            dt = datetime.strptime(v, fmt).replace(tzinfo=timezone.utc)
-            return int(dt.timestamp())
-        except ValueError:
-            continue
-    logger.warning('[parseCloseDate] Не распознан формат даты: %s', v)
-    return None
-
-
-def timing_options(step_data: dict, prefix: str) -> dict:
-    """Автозакрытие опроса/квиза: Telegram принимает open_period (5–86400 с)
-    или close_date. Приоритет у close_date — при обоих период не шлём."""
-    close_date = parse_close_date(
-        get_step_value(step_data, f'{prefix}_close_date'))
-    if close_date is not None:
-        return {'close_date': close_date}
-    raw = str(get_step_value(step_data, f'{prefix}_open_period') or '').strip()
-    if raw.isdigit():
-        period = int(raw)
-        if 5 <= period <= 86400:
-            return {'open_period': period}
-    return {}
-
-
-# ---------------------------------------------------------------------------
-# Кости / слоты (Utils :451-565)
-# ---------------------------------------------------------------------------
-
-def parse_dice_value(dice_str: Any) -> str:
-    if not dice_str or str(dice_str).strip() == '':
-        return '🎲'
-    dice = str(dice_str).strip()
-    return dice if dice in config.DICE_TYPES else '🎲'
-
-
-def parse_dice_logic_value(logic_value_str: Any) -> Optional[list[int]]:
-    if not logic_value_str or str(logic_value_str).strip() == '':
-        return None
-    try:
-        text = str(logic_value_str)
-        if any(sym in text for sym in ('🍒', '🍋', '🔔', '7️⃣')):
-            symbols = [s.strip() for s in text.split(',') if s.strip()]
-            numeric_values = [config.SYMBOL_TO_NUMBER[s] for s in symbols
-                              if s in config.SYMBOL_TO_NUMBER]
-            return numeric_values or None
-        return _parse_int_list(text)
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def parse_dice_step_mapping(dice_step_str: Any) -> Optional[list[int]]:
-    if not dice_step_str or str(dice_step_str).strip() == '':
-        return None
-    try:
-        return _parse_int_list(str(dice_step_str))
-    except Exception:  # noqa: BLE001
-        return None
-
 
 def get_dice_step_from_value(dice_value: Any, logic_values: Optional[list],
                              step_mapping: Optional[list]) -> int:
@@ -356,109 +84,9 @@ def get_same_symbol_number(symbols: str) -> int:
     return config.SYMBOL_TO_NUMBER.get(symbols, 0)
 
 
-def get_symbol_number_from_dice_value(dice_value: int) -> int:
-    symbols = get_slot_symbols(dice_value)
-    if are_all_symbols_same(symbols):
-        return get_same_symbol_number(symbols)
-    return 0
-
-
-def format_dice_result(dice_emoji: str, dice_value: Any) -> str:
-    if dice_emoji == '🎰':
-        symbols = get_slot_symbols(dice_value)
-        if are_all_symbols_same(symbols):
-            combo_number = get_same_symbol_number(symbols)
-            return (f'{dice_emoji}: {symbols} '
-                    f'(комбинация #{combo_number}, значение: {dice_value})')
-        return f'{dice_emoji}: {symbols} (разные символы, значение: {dice_value})'
-    return f'{dice_emoji}: {dice_value}'
-
-
 # ---------------------------------------------------------------------------
-# Barcode / QR (Utils :1120-1381)
+# Barcode / QR: сборка URL и данные для отправки
 # ---------------------------------------------------------------------------
-
-def parse_qr_config(qr_param_str: str) -> dict:
-    try:
-        if not qr_param_str or qr_param_str.strip() == '':
-            return {}
-
-        params: dict[str, Any] = {}
-        for pair in qr_param_str.split('&'):
-            if '=' not in pair:
-                continue
-            key, _, value = pair.partition('=')
-            clean_key = key.strip().lower()
-            clean_value = value.strip()
-            try:
-                from urllib.parse import unquote
-                clean_value = unquote(clean_value)
-            except Exception:  # noqa: BLE001
-                pass
-
-            if clean_key == 'text':
-                params['text'] = clean_value
-            elif clean_key == 'size':
-                try:
-                    size = int(clean_value)
-                    if size > 0:
-                        params['size'] = size
-                except ValueError:
-                    pass
-            elif clean_key == 'margin':
-                try:
-                    margin = int(clean_value)
-                    if margin >= 0:
-                        params['margin'] = margin
-                except ValueError:
-                    pass
-            elif clean_key == 'format':
-                fmt = clean_value.lower()
-                if fmt in ('png', 'jpeg', 'jpg', 'svg'):
-                    params['format'] = 'jpeg' if fmt == 'jpg' else fmt
-            elif clean_key in ('dark', 'color'):
-                dark_color = clean_value.replace('#', '')
-                if re.match(r'^[0-9A-Fa-f]{3,6}$', dark_color):
-                    params['dark'] = dark_color
-            elif clean_key in ('light', 'bgcolor'):
-                light_color = clean_value.replace('#', '')
-                if re.match(r'^[0-9A-Fa-f]{3,6}$', light_color):
-                    params['light'] = light_color
-            elif clean_key in ('ecl', 'eclevel'):
-                ecl = clean_value.upper()
-                if ecl in ('L', 'M', 'Q', 'H'):
-                    params['ecl'] = ecl
-            elif clean_key == 'centerimageurl':
-                if clean_value and clean_value.lower() not in ('none', 'false', 'null'):
-                    params['centerImageUrl'] = clean_value
-            elif clean_key == 'centerimagesizeratio':
-                try:
-                    logo_size = float(clean_value)
-                    if 0 < logo_size <= 1:
-                        params['centerImageSizeRatio'] = logo_size
-                except ValueError:
-                    pass
-            elif clean_key == 'caption':
-                params['caption'] = clean_value
-            elif clean_key == 'captionfontfamily':
-                params['captionFontFamily'] = clean_value
-            elif clean_key == 'captionfontsize':
-                try:
-                    caption_size = int(clean_value)
-                    if caption_size > 0:
-                        params['captionFontSize'] = caption_size
-                except ValueError:
-                    pass
-            elif clean_key == 'captionfontcolor':
-                caption_color = clean_value.replace('#', '')
-                if re.match(r'^[0-9A-Fa-f]{3,6}$', caption_color):
-                    params['captionFontColor'] = caption_color
-
-        return params
-    except Exception as error:  # noqa: BLE001
-        logger.error('Error parsing QR config: %s', error)
-        return {}
-
 
 def generate_barcode_url(data: str, options: Optional[dict] = None,
                          qr_config: Optional[dict] = None) -> Optional[str]:
@@ -526,20 +154,17 @@ def generate_barcode_url(data: str, options: Optional[dict] = None,
         return None
 
 
-def process_barcode_data(data: str) -> str:
-    """Возвращает данные как есть (портировано для паритета с оригиналом)."""
-    return data
-
-
-def parse_barcode_data(ctx: BotContext, step_data: dict,
+def parse_barcode_data(ctx: BotContext, step: Step,
                        user_id: Any = None) -> dict:
+    """Данные QR: подстановка {тегов} и генерация id, если данных нет.
+
+    Настройки картинки (options/qr_config) уже разобраны в Step.barcode.
+    """
     try:
-        content = get_step_value(step_data, 'content') or ''
-        barcode_data = str(content)
+        barcode = step.barcode
+        barcode_data = str(barcode.data) if barcode else ''
         if user_id and '{' in barcode_data:
             barcode_data = users.replace_tags_in_text(ctx, barcode_data, user_id)
-
-        barcode_data = process_barcode_data(barcode_data)
 
         if not barcode_data or barcode_data.strip() == '':
             user_info = users.get_user_info(ctx, user_id) if user_id else None
@@ -548,40 +173,11 @@ def parse_barcode_data(ctx: BotContext, step_data: dict,
             random_str = format(random.randint(0, 36 ** 9 - 1), 'X').upper()[:9]
             barcode_data = f'USER_{unique_id}_{timestamp}_{random_str}'
 
-        qr_param = get_step_value(step_data, 'qr') or ''
-        qr_config = {}
-        if qr_param and str(qr_param).strip() != '':
-            qr_config = parse_qr_config(str(qr_param).strip())
-
-        options: dict[str, Any] = {}
-        barcode_size = get_step_value(step_data, 'barcode_size') or ''
-        barcode_color = get_step_value(step_data, 'barcode_color') or ''
-        barcode_bg_color = get_step_value(step_data, 'barcode_bg_color') or ''
-        barcode_logo = get_step_value(step_data, 'barcode_logo') or ''
-        barcode_logo_size = get_step_value(step_data, 'barcode_logo_size') or ''
-        barcode_ecl = get_step_value(step_data, 'barcode_ecl') or ''
-
-        if barcode_size:
-            try:
-                options['size'] = int(str(barcode_size))
-            except ValueError:
-                pass
-        if barcode_color:
-            options['color'] = str(barcode_color).replace('#', '')
-        if barcode_bg_color:
-            options['bgColor'] = str(barcode_bg_color).replace('#', '')
-        if barcode_logo:
-            options['logoUrl'] = barcode_logo
-        if barcode_logo_size:
-            try:
-                options['logoSizeRatio'] = float(str(barcode_logo_size))
-            except ValueError:
-                pass
-        if barcode_ecl:
-            options['ecl'] = barcode_ecl
-        options['format'] = 'png'
-
-        return {'data': barcode_data, 'options': options, 'qrConfig': qr_config}
+        return {
+            'data': barcode_data,
+            'options': dict(barcode.options) if barcode else {},
+            'qrConfig': dict(barcode.qr_config) if barcode else {},
+        }
     except Exception as error:  # noqa: BLE001
         logger.error('Error parsing barcode data: %s', error)
         return {'data': f'USER_{user_id}_{int(time.time() * 1000)}',
@@ -610,92 +206,40 @@ def download_image_as_base64(image_url: str) -> Optional[str]:
 
 class StepManager:
     @staticmethod
-    def get_step_data(ctx: BotContext, step_number: int) -> Optional[dict]:
+    def get_step_data(ctx: BotContext, step_number: int) -> Optional[Step]:
         if not ctx.funnel_id:
             return None
         return ctx.storage.get_step(ctx.funnel_id, step_number)
 
     @staticmethod
     def get_next_step(ctx: BotContext, current_step: int) -> int:
-        """next_step из шага, иначе current+1 (если есть), иначе 0 = конец."""
-        step_data = StepManager.get_step_data(ctx, current_step)
-        if not step_data:
+        """step.next (>0), иначе current+1 (если есть), иначе 0 = конец."""
+        step = StepManager.get_step_data(ctx, current_step)
+        if not step:
             return 0
-
-        next_step_value = get_step_value(step_data, 'next_step') or ''
-        if str(next_step_value).strip() != '':
-            next_step = parse_step_number(next_step_value)
-            if next_step is not None and next_step > 0:
-                return next_step
-
+        if step.next is not None and step.next > 0:
+            return step.next
         next_sequential = current_step + 1
         if StepManager.get_step_data(ctx, next_sequential):
             return next_sequential
         return 0
 
     @staticmethod
-    def get_keyboard_for_step(ctx: BotContext, step_number: int) -> Optional[dict]:
-        if not ctx.funnel_id:
-            return None
-        cached = ctx.storage.get_reply_keyboard(ctx.funnel_id, step_number)
-        if cached:
-            return cached
-        # Фолбэк (в оригинале — чтение листа): разбор из данных шага
-        step_data = StepManager.get_step_data(ctx, step_number)
-        if not step_data:
-            return None
-        keyboard_str = get_step_value(step_data, 'regular_keyboard') or ''
-        if not str(keyboard_str).strip():
-            return None
-        parsed = keyboards.parse_regular_keyboard_data(keyboard_str)
-        if parsed and parsed['buttons']:
-            keyboard_data = {'parsedData': parsed, 'step': step_number,
-                             'funnelId': ctx.funnel_id}
-            ctx.storage.reply_keyboards_cache[f'{ctx.funnel_id}_{step_number}'] = \
-                keyboard_data
-            return keyboard_data
-        return None
+    def get_keyboard_for_step(ctx: BotContext,
+                              step_number: int) -> Optional[dict]:
+        step = StepManager.get_step_data(ctx, step_number)
+        return step.reply_keyboard if step else None
 
     @staticmethod
     def get_inline_keyboard_for_step(ctx: BotContext,
                                      step_number: int) -> Optional[dict]:
-        if not ctx.funnel_id:
-            return None
-        cached = ctx.storage.get_inline_keyboard(ctx.funnel_id, step_number)
-        if cached:
-            return cached
-        step_data = StepManager.get_step_data(ctx, step_number)
-        if not step_data:
-            return None
-        inline_str = get_step_value(step_data, 'inline_keyboard') or ''
-        if not str(inline_str).strip():
-            return None
-        channel = get_step_value(step_data, 'channel')
-        subscription = get_step_value(step_data, 'subscription')
-        no_subscription = get_step_value(step_data, 'no_subscription')
-        parsed = keyboards.parse_inline_keyboard_data(inline_str)
-        if parsed and parsed['buttons']:
-            built = keyboards.build_inline_keyboard_from_parsed_data(parsed, channel)
-            keyboard_data = {
-                'inlineKeyboard': built,
-                'step': step_number,
-                'funnelId': ctx.funnel_id,
-                'channel': channel or '',
-                'subscriptionMessage': subscription or '',
-                'noSubscriptionMessage': no_subscription or '',
-                'parsedData': parsed,
-            }
-            ctx.storage.inline_keyboards_cache[f'{ctx.funnel_id}_{step_number}'] = \
-                keyboard_data
-            return keyboard_data
-        return None
+        step = StepManager.get_step_data(ctx, step_number)
+        return step.inline_keyboard if step else None
 
 
 def build_reply_keyboard(ctx: BotContext, step_number: int,
                          user_role: str = '') -> Optional[dict]:
-    """Порт buildReplyKeyboard (:3907)."""
-    if not ctx.funnel_id:
-        return None
+    """Порт buildReplyKeyboard (:3907): role-фильтр клавиатуры при отправке."""
     keyboard_data = StepManager.get_keyboard_for_step(ctx, step_number)
     if not keyboard_data or not keyboard_data.get('parsedData'):
         return None
@@ -712,35 +256,34 @@ def _now_ms() -> float:
 
 
 def add_dice_result(ctx: BotContext, message_id: Any, user_id: Any, chat_id: Any,
-                    dice_value: Any, step_number: int, step_data: dict) -> None:
+                    dice_value: Any, step: Step) -> None:
     ctx.storage.dice_results[message_id] = {
         'userId': user_id, 'chatId': chat_id, 'diceValue': dice_value,
-        'stepNumber': step_number, 'stepData': step_data,
+        'step': step,
         'timestamp': _now_ms(), 'processed': False,
     }
     ctx.storage.cleanup_game_caches()
 
 
 def add_poll_result(ctx: BotContext, poll_id: str, user_id: Any, chat_id: Any,
-                    step_number: int, step_data: dict, logic_values: list,
-                    steps: list, target: str = 'poll') -> None:
-    cache = ctx.storage.poll_results if target == 'poll' else ctx.storage.quiz_results
+                    step: Step) -> None:
+    cache = ctx.storage.poll_results if step.type == 'poll' \
+        else ctx.storage.quiz_results
     cache[poll_id] = {
         'userId': user_id, 'chatId': chat_id, 'selectedOption': -1,
-        'stepNumber': step_number, 'stepData': step_data,
-        'logicValues': logic_values or [], 'steps': steps or [],
+        'step': step,
         'timestamp': _now_ms(), 'processed': False,
     }
     ctx.storage.cleanup_game_caches()
 
 
 def _run_step_calc(ctx: BotContext, chat_id: Any, user_id: Any,
-                   step_data: Optional[dict]) -> None:
-    """Формула calc из формы шага (calc_formula) — авто-расчёт после
+                   step: Optional[Step]) -> None:
+    """Формула calc из шага (calc_formula) — авто-расчёт после
     броска/ответа, до отправки следующего шага. Успех не шлёт отдельное
     сообщение (следующий шаг покажет новые теги); ошибку показываем,
     чтобы её не было незаметно."""
-    formula = str(get_step_value(step_data or {}, 'calc_formula') or '').strip()
+    formula = (step.calc_formula if step else '') or ''
     if not formula:
         return
     result = functions.execute_calc_formula(ctx, user_id, formula, '')
@@ -758,43 +301,40 @@ def process_dice_result(ctx: BotContext, message_id: Any) -> bool:
         user_id = dice_result['userId']
         chat_id = dice_result['chatId']
         dice_value = dice_result['diceValue']
-        step_number = dice_result['stepNumber']
-        step_data = dice_result['stepData']
+        step: Step = dice_result['step']
 
-        dice_emoji = get_step_value(step_data, 'dice') or '🎲'
-        dice_logic_value = get_step_value(step_data, 'dice_logic_value') or ''
-        dice_step = get_step_value(step_data, 'dice_step') or ''
+        dice_emoji = step.dice.emoji
 
         # Результат броска → теги {dice}/{dice_emoji}/… для формул calc.
         users.save_dice_tags(ctx, user_id, dice_emoji, dice_value)
-        # Формула из формы шага (calc_formula) — авто-расчёт по тегам.
-        _run_step_calc(ctx, chat_id, user_id, step_data)
+        # Формула из шага (calc_formula) — авто-расчёт по тегам.
+        _run_step_calc(ctx, chat_id, user_id, step)
 
         next_step = 0
-        if str(dice_logic_value).strip() and str(dice_step).strip():
-            logic_values = parse_dice_logic_value(dice_logic_value)
-            step_mapping = parse_dice_step_mapping(dice_step)
-            if logic_values and step_mapping and len(logic_values) == len(step_mapping):
-                if dice_emoji == '🎰':
-                    symbols = get_slot_symbols(dice_value)
-                    if are_all_symbols_same(symbols):
-                        next_step = get_dice_step_from_value(
-                            get_same_symbol_number(symbols),
-                            logic_values, step_mapping)
-                    else:
-                        next_step = get_dice_step_from_value(
-                            0, logic_values, step_mapping)
+        logic_values = step.dice.logic_values
+        step_mapping = step.dice.steps
+        if logic_values and step_mapping \
+                and len(logic_values) == len(step_mapping):
+            if dice_emoji == '🎰':
+                symbols = get_slot_symbols(dice_value)
+                if are_all_symbols_same(symbols):
+                    next_step = get_dice_step_from_value(
+                        get_same_symbol_number(symbols),
+                        logic_values, step_mapping)
                 else:
                     next_step = get_dice_step_from_value(
-                        dice_value, logic_values, step_mapping)
+                        0, logic_values, step_mapping)
+            else:
+                next_step = get_dice_step_from_value(
+                    dice_value, logic_values, step_mapping)
 
         if next_step <= 0:
             if dice_emoji == '🎰':
                 symbols = get_slot_symbols(dice_value)
                 if not are_all_symbols_same(symbols):
-                    next_step = StepManager.get_next_step(ctx, step_number)
+                    next_step = StepManager.get_next_step(ctx, step.number)
             else:
-                next_step = StepManager.get_next_step(ctx, step_number)
+                next_step = StepManager.get_next_step(ctx, step.number)
 
         dice_result['processed'] = True
         time.sleep(1)
@@ -822,7 +362,7 @@ def check_dice_result(ctx: BotContext, message_id: Any, chat_id: Any) -> None:
             random_value = random.randint(1, 6)
             add_dice_result(ctx, message_id, dice_result['userId'],
                             dice_result['chatId'], random_value,
-                            dice_result['stepNumber'], dice_result['stepData'])
+                            dice_result['step'])
             time.sleep(1)
             process_dice_result(ctx, message_id)
     except Exception:  # noqa: BLE001
@@ -838,25 +378,26 @@ def process_poll_result(ctx: BotContext, poll_id: str, target: str = 'poll') -> 
             return False
 
         selected_option = poll_result.get('selectedOption', -1)
-        step_number = poll_result['stepNumber']
-        logic_values = poll_result.get('logicValues') or []
-        steps = poll_result.get('steps') or []
+        step: Step = poll_result['step']
+        cfg = step.poll if target == 'poll' else step.quiz
+        logic_values = cfg.logic_values if cfg else []
+        steps_list = cfg.steps if cfg else []
 
         # Ответ poll/quiz → теги {poll_answer}/{quiz_correct}/… для формул calc.
         users.save_poll_tags(ctx, poll_result['userId'], target,
-                             selected_option, logic_values,
-                             poll_result.get('stepData') or {})
-        # Формула из формы шага (calc_formula) — авто-расчёт по тегам.
-        _run_step_calc(ctx, poll_result['chatId'], poll_result['userId'],
-                       poll_result.get('stepData') or {})
+                             selected_option, logic_values, step.quiz)
+        # Формула из шага (calc_formula) — авто-расчёт по тегам.
+        _run_step_calc(ctx, poll_result['chatId'], poll_result['userId'], step)
 
         next_step = 0
-        if logic_values and steps:
-            if 0 <= selected_option < len(logic_values):
-                next_step = steps[selected_option] or 0
+        if logic_values and steps_list \
+                and 0 <= selected_option < len(logic_values):
+            # Как в JS: steps[selected] может отсутствовать → undefined → 0.
+            next_step = (steps_list[selected_option]
+                         if selected_option < len(steps_list) else 0) or 0
 
         if next_step <= 0:
-            next_step = StepManager.get_next_step(ctx, step_number)
+            next_step = StepManager.get_next_step(ctx, step.number)
 
         poll_result['processed'] = True
         time.sleep(0.5)
@@ -906,16 +447,9 @@ def _media_payload_field(media_type: str) -> str:
     return media_type
 
 
-def _valid_http_url(value: str) -> bool:
-    try:
-        parsed = urlparse(value)
-        return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _guess_url_media_type(url: str) -> str:
     """Тип элемента media_group по расширению URL (фото/видео/аудио/документ)."""
+    from urllib.parse import urlparse
     path = urlparse(url).path.lower()
     for ext in ('.mp4', '.webm', '.mov', '.m4v', '.avi', '.mkv'):
         if path.endswith(ext):
@@ -980,39 +514,28 @@ def send_media_group_universal(ctx: BotContext, chat_id, media_items: list,
         return None
 
 
-def send_media_message(ctx: BotContext, chat_id, step_data: dict,
-                       media_type: str, options: Optional[dict] = None) -> Any:
-    """Порт sendMediaMessage (:4244)."""
+def send_media_message(ctx: BotContext, chat_id, step: Step,
+                       media_type: str, options: Optional[dict] = None,
+                       caption: Optional[str] = None) -> Any:
+    """Порт sendMediaMessage (:4244).
+
+    Файлы уже разобраны в step.file_urls/step.file_ids при загрузке;
+    caption — текст с подставленными тегами (готовит send_step_message),
+    по умолчанию — сырой step.text.
+    """
     options = options or {}
     try:
-        file_url = get_step_value(step_data, 'file_url') or ''
-        file_id = get_step_value(step_data, 'file_id') or ''
-        if file_id and isinstance(file_id, str):
-            file_id = clean_file_id(file_id)
-
-        caption = ''
-        step_type_value = get_step_value(step_data, 'type') or ''
-        if is_media_type(step_type_value):
-            caption = get_step_value(step_data, 'content') or ''
-
-        urls: list[str] = []
-        if file_url and str(file_url).strip() != '':
-            urls = [u.strip() for u in str(file_url).split(',') if u.strip()]
-            urls = [u for u in urls if _valid_http_url(u)]
-
-        file_ids: list[str] = []
-        if file_id and str(file_id).strip() != '':
-            file_ids = [f.strip() for f in str(file_id).split(',') if f.strip()]
-            file_ids = [f for f in file_ids
-                        if f and not f.startswith(('http://', 'https://'))
-                        and re.match(r'^[A-Za-z0-9_\-]+$', f)]
+        if caption is None:
+            caption = step.text
+        urls = list(step.file_urls)
+        file_ids = list(step.file_ids)
 
         total_files = len(urls) + len(file_ids)
 
         if total_files == 0:
-            content = get_step_value(step_data, 'content') or ''
+            content = step.text
             if content and str(content).startswith(('http://', 'https://')) \
-                    and _valid_http_url(str(content)):
+                    and valid_http_url(str(content)):
                 message_id = ctx.tg.send_photo(chat_id, content, caption, options)
                 if message_id:
                     return message_id
@@ -1042,7 +565,7 @@ def send_media_message(ctx: BotContext, chat_id, step_data: dict,
             for file in file_ids:
                 item_type = media_type if media_type in plain_media \
                     else 'document'
-                media_item = {'type': item_type, 'media': file}
+                media_item: dict[str, Any] = {'type': item_type, 'media': file}
                 if not all_media and caption and caption.strip() != '':
                     media_item['caption'] = caption.strip()
                     media_item['parse_mode'] = 'HTML'
@@ -1103,7 +626,7 @@ def send_media_message(ctx: BotContext, chat_id, step_data: dict,
         return None
     except Exception as error:  # noqa: BLE001
         logger.error('Error in sendMediaMessage: %s', error)
-        caption = get_step_value(step_data, 'content') or ''
+        caption = step.text
         if caption and str(caption).strip() != '':
             ctx.tg.send_message(chat_id,
                                 '<b>ℹ️ Информация</b>\n\n' + str(caption),
@@ -1115,22 +638,18 @@ def send_media_message(ctx: BotContext, chat_id, step_data: dict,
 # Barcode / Poll / Quiz / Dice отправка
 # ---------------------------------------------------------------------------
 
-def _should_pin(should_pin: Any) -> bool:
-    return str(should_pin or '').lower().strip() in ('true', '1', 'да', 'yes')
-
-
-def send_barcode_message(ctx: BotContext, chat_id, step_data: dict,
+def send_barcode_message(ctx: BotContext, chat_id, step: Step,
                          options: dict, user_id: Any) -> Any:
     """Порт sendBarcodeMessage (:4439)."""
     try:
         time.sleep(0.5)
 
-        barcode_info = parse_barcode_data(ctx, step_data, user_id)
+        barcode_info = parse_barcode_data(ctx, step, user_id)
 
         if user_id:
-            type_value = get_step_value(step_data, 'type_value') or 'Barcode'
-            users.save_user_input_response(ctx, user_id, type_value,
-                                           barcode_info['data'])
+            users.save_user_input_response(
+                ctx, user_id, step.type_value or 'Barcode',
+                barcode_info['data'])
 
         qr_code_url = generate_barcode_url(barcode_info['data'],
                                            barcode_info['options'],
@@ -1144,7 +663,7 @@ def send_barcode_message(ctx: BotContext, chat_id, step_data: dict,
                 options)
             return None
 
-        caption = get_step_value(step_data, 'content') or ''
+        caption = step.text
         processed_caption = ''
         if caption and str(caption).strip() != '':
             processed_caption = (users.replace_tags_in_text(ctx, caption, user_id)
@@ -1154,9 +673,7 @@ def send_barcode_message(ctx: BotContext, chat_id, step_data: dict,
             message_id = ctx.tg.send_photo(chat_id, qr_code_url,
                                            processed_caption, options)
             if message_id:
-                should_pin = (get_step_value(step_data, 'pin')
-                              or get_step_value(step_data, 'pin_message'))
-                if _should_pin(should_pin):
+                if step.pin:
                     ctx.tg.pin_message(chat_id, message_id)
                 return message_id
         except Exception as error:  # noqa: BLE001
@@ -1183,99 +700,89 @@ def send_barcode_message(ctx: BotContext, chat_id, step_data: dict,
         return None
 
 
-def handle_poll_message(ctx: BotContext, chat_id, step_data: dict, options: dict,
-                        step_number: int, user_id: Any) -> None:
+def handle_poll_message(ctx: BotContext, chat_id, step: Step, options: dict,
+                        user_id: Any) -> None:
     """Порт MessageHandler.handlePollMessage (:5733)."""
-    poll_str = get_step_value(step_data, 'poll') or ''
-    if not str(poll_str).strip():
-        # Форма пишет раздельные поля — собираем эталонную строку.
-        poll_str = compose_poll_string(step_data)
-    poll_data = parse_poll_data(poll_str)
-
-    if not poll_data or not 2 <= len(poll_data['answers']) <= 10:
+    poll = step.poll
+    if not poll or not 2 <= len(poll.answers) <= 10:
         ctx.tg.send_message(
             chat_id,
             '<b>❌ Ошибка:</b> Для опроса нужно от 2 до 10 вариантов ответа. '
             'Проверьте поле с вариантами.')
         return
 
-    question = poll_data['question']
+    question = poll.question
     if user_id:
         question = users.replace_tags_in_text(ctx, question, user_id)
 
     poll_options: dict[str, Any] = {
         'type': 'regular',
-        'is_anonymous': poll_data['anonymous'],
-        'allows_multiple_answers': poll_data['multiple'],
+        'is_anonymous': poll.anonymous,
+        'allows_multiple_answers': poll.multiple,
     }
-    poll_options.update(timing_options(step_data, 'poll'))
+    if poll.close_date is not None:
+        poll_options['close_date'] = poll.close_date
+    elif poll.open_period is not None:
+        poll_options['open_period'] = poll.open_period
     if options.get('reply_markup'):
         poll_options['reply_markup'] = options['reply_markup']
 
-    poll_result = ctx.tg.send_poll(chat_id, question, poll_data['answers'],
+    poll_result = ctx.tg.send_poll(chat_id, question, poll.answers,
                                    poll_options)
     if poll_result and poll_result.get('message_id') and poll_result.get('poll_id'):
-        add_poll_result(ctx, poll_result['poll_id'], user_id, chat_id,
-                        step_number, step_data,
-                        poll_data.get('logicValues') or [],
-                        poll_data.get('steps') or [], target='poll')
-        if get_step_value(step_data, 'pin') == 'true':
+        add_poll_result(ctx, poll_result['poll_id'], user_id, chat_id, step)
+        if step.pin:
             ctx.tg.pin_message(chat_id, poll_result['message_id'])
 
 
-def handle_quiz_message(ctx: BotContext, chat_id, step_data: dict, options: dict,
-                        step_number: int, user_id: Any) -> None:
+def handle_quiz_message(ctx: BotContext, chat_id, step: Step, options: dict,
+                        user_id: Any) -> None:
     """Порт MessageHandler.handleQuizMessage (:5781)."""
-    quiz_str = get_step_value(step_data, 'quiz') or ''
-    if not str(quiz_str).strip():
-        # Форма пишет раздельные поля — собираем эталонную строку.
-        quiz_str = compose_quiz_string(step_data)
-    quiz_data = parse_quiz_data(quiz_str)
-
-    if not quiz_data or not 2 <= len(quiz_data['answers']) <= 10:
+    quiz = step.quiz
+    if not quiz or not 2 <= len(quiz.answers) <= 10:
         ctx.tg.send_message(
             chat_id,
             '<b>❌ Ошибка:</b> Для викторины нужно от 2 до 10 вариантов '
             'ответа. Проверьте поле с вариантами.')
         return
 
-    if not (0 <= quiz_data['correctOption'] < len(quiz_data['answers'])):
+    if not (0 <= quiz.correct_option < len(quiz.answers)):
         ctx.tg.send_message(
             chat_id,
             '<b>❌ Ошибка:</b> Неправильный номер правильного ответа. '
             'Проверьте колонку Quiz.')
         return
 
-    question = quiz_data['question']
+    question = quiz.question
     if user_id:
         question = users.replace_tags_in_text(ctx, question, user_id)
 
     poll_options: dict[str, Any] = {
         'type': 'quiz',
-        'correct_option_id': quiz_data['correctOption'],
-        'is_anonymous': quiz_data['anonymous'],
+        'correct_option_id': quiz.correct_option,
+        'is_anonymous': quiz.anonymous,
     }
-    poll_options.update(timing_options(step_data, 'quiz'))
-    if quiz_data.get('explanation') and quiz_data['explanation'].strip() != '':
-        poll_options['explanation'] = quiz_data['explanation']
+    if quiz.close_date is not None:
+        poll_options['close_date'] = quiz.close_date
+    elif quiz.open_period is not None:
+        poll_options['open_period'] = quiz.open_period
+    if quiz.explanation and quiz.explanation.strip() != '':
+        poll_options['explanation'] = quiz.explanation
     if options.get('reply_markup'):
         poll_options['reply_markup'] = options['reply_markup']
 
-    poll_result = ctx.tg.send_poll(chat_id, question, quiz_data['answers'],
+    poll_result = ctx.tg.send_poll(chat_id, question, quiz.answers,
                                    poll_options)
     if poll_result and poll_result.get('message_id') and poll_result.get('poll_id'):
-        add_poll_result(ctx, poll_result['poll_id'], user_id, chat_id,
-                        step_number, step_data,
-                        quiz_data.get('logicValues') or [],
-                        quiz_data.get('steps') or [], target='quiz')
-        if get_step_value(step_data, 'pin') == 'true':
+        add_poll_result(ctx, poll_result['poll_id'], user_id, chat_id, step)
+        if step.pin:
             ctx.tg.pin_message(chat_id, poll_result['message_id'])
 
 
-def handle_dice_message(ctx: BotContext, chat_id, step_data: dict, options: dict,
-                        step_number: int, user_id: Any) -> None:
+def handle_dice_message(ctx: BotContext, chat_id, step: Step, options: dict,
+                        user_id: Any) -> None:
     """Порт MessageHandler.handleDiceMessage (:5842)."""
-    dice_emoji = parse_dice_value(get_step_value(step_data, 'dice') or '🎲')
+    dice_emoji = step.dice.emoji
     # sendDice не принимает parse_mode/caption — из options шлём только
     # клавиатуру (reply_markup).
     dice_options: dict[str, Any] = {}
@@ -1287,18 +794,17 @@ def handle_dice_message(ctx: BotContext, chat_id, step_data: dict, options: dict
         message_id = dice_result['message_id']
         if dice_result.get('dice_value'):
             add_dice_result(ctx, message_id, user_id, chat_id,
-                            dice_result['dice_value'], step_number, step_data)
+                            dice_result['dice_value'], step)
             time.sleep(1)
             process_dice_result(ctx, message_id)
         else:
-            add_dice_result(ctx, message_id, user_id, chat_id, 0,
-                            step_number, step_data)
+            add_dice_result(ctx, message_id, user_id, chat_id, 0, step)
             timer = threading.Timer(3.0, check_dice_result,
                                     args=(ctx, message_id, chat_id))
             timer.daemon = True
             timer.start()
 
-        if get_step_value(step_data, 'pin') == 'true':
+        if step.pin:
             ctx.tg.pin_message(chat_id, message_id)
 
 
@@ -1326,27 +832,19 @@ _TYPING_ACTION_MAP = {
 
 
 def _pin_if_needed(ctx: BotContext, chat_id, message_id: Any,
-                   should_pin: Any) -> None:
-    if message_id and _should_pin(should_pin):
+                   should_pin: bool) -> None:
+    if message_id and should_pin:
         ctx.tg.pin_message(chat_id, message_id)
 
 
 def send_step_message(ctx: BotContext, chat_id, step_number: int,
                       user_id: Any = None) -> None:
     """Порт MessageHandler.sendStepMessage (:5503) — диспетчер типов шагов."""
-    step_data = StepManager.get_step_data(ctx, step_number)
-    if not step_data:
+    step = StepManager.get_step_data(ctx, step_number)
+    if not step:
         ctx.tg.send_message(
             chat_id, f'<b>⚠️ Шаг {step_number} не найден в воронке</b>')
         return
-
-    step_type_value = get_step_value(step_data, 'type') or ''
-    step_type = normalize_type_value(step_type_value)
-    scroll_value = str(get_step_value(step_data, 'scroll') or '').strip().lower()
-    delay_value = get_step_value(step_data, 'delay') or ''
-    should_pin = (get_step_value(step_data, 'pin')
-                  or get_step_value(step_data, 'pin_message'))
-    content = get_step_value(step_data, 'content') or ''
 
     options: dict[str, Any] = {'parse_mode': 'HTML'}
 
@@ -1354,43 +852,36 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
     reply_keyboard = build_reply_keyboard(ctx, step_number, user_role)
     if reply_keyboard:
         options['reply_markup'] = reply_keyboard['reply_markup']
-    else:
-        inline_data = StepManager.get_inline_keyboard_for_step(ctx, step_number)
-        if inline_data and inline_data.get('inlineKeyboard'):
-            options['reply_markup'] = inline_data['inlineKeyboard']
+    elif step.inline_keyboard and step.inline_keyboard.get('inlineKeyboard'):
+        options['reply_markup'] = step.inline_keyboard['inlineKeyboard']
 
-    has_effects = effects.has_effects(content)
+    has_effects = effects.has_effects(step.text)
 
-    processed_content = content
+    processed_text = step.text
     if user_id:
-        processed_content = users.replace_tags_in_text(ctx, content, user_id)
+        processed_text = users.replace_tags_in_text(ctx, step.text, user_id)
 
     if ctx.config.get('typing', False):
-        action = _TYPING_ACTION_MAP.get(step_type, 'typing')
+        action = _TYPING_ACTION_MAP.get(step.type, 'typing')
         ctx.tg.send_chat_action(chat_id, action)
 
-    if step_type == 'barcode':
-        send_barcode_message(ctx, chat_id, step_data, options, user_id)
-    elif step_type == 'poll':
-        handle_poll_message(ctx, chat_id, step_data, options, step_number, user_id)
-    elif step_type == 'quiz':
-        handle_quiz_message(ctx, chat_id, step_data, options, step_number, user_id)
-    elif step_type == 'dice':
-        handle_dice_message(ctx, chat_id, step_data, options, step_number, user_id)
-    elif is_media_type(step_type_value):
-        step_data_for_media = dict(step_data)
-        if user_id:
-            caption = get_step_value(step_data_for_media, 'content') or ''
-            if caption:
-                step_data_for_media['content'] = users.replace_tags_in_text(
-                    ctx, caption, user_id)
-        send_media_message(ctx, chat_id, step_data_for_media, step_type, options)
+    if step.type == 'barcode':
+        send_barcode_message(ctx, chat_id, step, options, user_id)
+    elif step.type == 'poll':
+        handle_poll_message(ctx, chat_id, step, options, user_id)
+    elif step.type == 'quiz':
+        handle_quiz_message(ctx, chat_id, step, options, user_id)
+    elif step.type == 'dice':
+        handle_dice_message(ctx, chat_id, step, options, user_id)
+    elif step.type in config.MEDIA_TYPES:
+        send_media_message(ctx, chat_id, step, step.type, options,
+                           caption=processed_text)
     else:
-        message_text = processed_content or ''
+        message_text = processed_text or ''
         if message_text.strip() != '':
             if not has_effects:
                 message_id = ctx.tg.send_message(chat_id, message_text, options)
-                _pin_if_needed(ctx, chat_id, message_id, should_pin)
+                _pin_if_needed(ctx, chat_id, message_id, step.pin)
             else:
                 try:
                     initial_text = effects.get_initial_text(message_text)
@@ -1406,7 +897,7 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
                                 edit_options=options)
                             if effects_processed:
                                 _pin_if_needed(ctx, chat_id, initial_message_id,
-                                               should_pin)
+                                               step.pin)
                         except Exception:  # noqa: BLE001
                             final_text = effects.get_final_text(message_text)
                             if final_text and final_text.strip() != '':
@@ -1417,17 +908,14 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
                                         effects.get_final_text(message_text),
                                         options)
 
-    if user_id and scroll_value == 'auto':
-        delay = parse_delay(delay_value)
-        if delay > 0:
-            time.sleep(delay)
+    if user_id and step.auto:
+        if step.delay > 0:
+            time.sleep(step.delay)
 
-        next_step = 0
-        next_step_value = get_step_value(step_data, 'next_step') or ''
-        if str(next_step_value).strip() != '':
-            next_step = parse_step_number(next_step_value) or 0
-        else:
-            next_step = StepManager.get_next_step(ctx, step_number)
+        # Пустая колонка next_step → последовательный переход; непустая
+        # (в т.ч. '0' = перехода нет) — как в оригинале, берём её.
+        next_step = step.next if step.next is not None \
+            else StepManager.get_next_step(ctx, step_number)
 
         if next_step > 0:
             users.set_user_state(ctx, user_id, next_step)
@@ -1439,38 +927,32 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
 def update_step_message(ctx: BotContext, chat_id, message_id: int,
                         step_number: int, user_id: Any = None) -> None:
     """Порт MessageHandler.updateStepMessage (:5664): editMessageText."""
-    step_data = StepManager.get_step_data(ctx, step_number)
-    if not step_data:
+    step = StepManager.get_step_data(ctx, step_number)
+    if not step:
         ctx.tg.send_message(
             chat_id, f'<b>⚠️ Шаг {step_number} не найден в воронке</b>')
         return
-
-    step_type_value = get_step_value(step_data, 'type') or ''
-    step_type = normalize_type_value(step_type_value)
-    content = get_step_value(step_data, 'content') or ''
 
     options: dict[str, Any] = {'parse_mode': 'HTML'}
     user_role = (users.get_user_tag(ctx, user_id, 'role') or '') if user_id else ''
     reply_keyboard = build_reply_keyboard(ctx, step_number, user_role)
     if reply_keyboard:
         options['reply_markup'] = reply_keyboard['reply_markup']
-    else:
-        inline_data = StepManager.get_inline_keyboard_for_step(ctx, step_number)
-        if inline_data and inline_data.get('inlineKeyboard'):
-            options['reply_markup'] = inline_data['inlineKeyboard']
+    elif step.inline_keyboard and step.inline_keyboard.get('inlineKeyboard'):
+        options['reply_markup'] = step.inline_keyboard['inlineKeyboard']
 
-    has_effects = effects.has_effects(content)
-    processed_content = content
+    has_effects = effects.has_effects(step.text)
+    processed_text = step.text
     if user_id:
-        processed_content = users.replace_tags_in_text(ctx, content, user_id)
+        processed_text = users.replace_tags_in_text(ctx, step.text, user_id)
 
-    if step_type in ('barcode', 'poll', 'quiz', 'dice') \
-            or is_media_type(step_type_value):
+    if step.type in ('barcode', 'poll', 'quiz', 'dice') \
+            or step.type in config.MEDIA_TYPES:
         ctx.tg.delete_message(chat_id, message_id)
         send_step_message(ctx, chat_id, step_number, user_id)
         return
 
-    message_text = processed_content or ''
+    message_text = processed_text or ''
     if message_text.strip() == '':
         return
 
@@ -1503,3 +985,6 @@ def complete_funnel(ctx: BotContext, user_id: Any, chat_id) -> None:
         ctx.tg.send_message(chat_id, f'<b>{processed}</b>')
 
     users.set_user_state(ctx, user_id, 0)
+
+
+

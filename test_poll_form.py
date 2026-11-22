@@ -16,10 +16,16 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from steps import (compose_poll_string,  # noqa: E402
-                   compose_quiz_string, handle_poll_message,
-                   handle_quiz_message, parse_close_date, parse_poll_data,
-                   parse_quiz_data, timing_options)
+from step_model import (build_step,  # noqa: E402
+                        compose_poll_string, compose_quiz_string,
+                        parse_close_date, parse_poll_data, parse_quiz_data,
+                        timing_options)
+from steps import handle_poll_message, handle_quiz_message  # noqa: E402
+
+
+def mk(data: dict):
+    """Сырая строка шага → Step (как при загрузке воронки)."""
+    return build_step(data, 1, 'f1')
 
 FORM_POLL = {
     'poll_question': 'Любимый цвет?',
@@ -103,7 +109,7 @@ class TestPollHandling(unittest.TestCase):
 
     def test_form_fields_reach_send_poll(self):
         ctx = make_ctx()
-        handle_poll_message(ctx, 1, dict(FORM_POLL), {}, 1, None)
+        handle_poll_message(ctx, 1, mk(dict(FORM_POLL)), {}, None)
 
         sent = calls(ctx, 'sendPoll')
         self.assertEqual(len(sent), 1)
@@ -115,7 +121,7 @@ class TestPollHandling(unittest.TestCase):
     def test_one_option_is_error(self):
         ctx = make_ctx()
         step = {'poll_question': 'Вопрос', 'poll_answer': 'Только один'}
-        handle_poll_message(ctx, 1, step, {}, 1, None)
+        handle_poll_message(ctx, 1, mk(step), {}, None)
         self.assertEqual(calls(ctx, 'sendPoll'), [])
         self.assertEqual(len(calls(ctx, 'sendMessage')), 1)
 
@@ -125,28 +131,28 @@ class TestPollHandling(unittest.TestCase):
             'poll_question': 'Вопрос',
             'poll_answer': ', '.join(f'a{i}' for i in range(11)),
         }
-        handle_poll_message(ctx, 1, step, {}, 1, None)
+        handle_poll_message(ctx, 1, mk(step), {}, None)
         self.assertEqual(calls(ctx, 'sendPoll'), [])
         self.assertEqual(len(calls(ctx, 'sendMessage')), 1)
 
     def test_open_period_passed(self):
         ctx = make_ctx()
         step = dict(FORM_POLL, poll_open_period='60')
-        handle_poll_message(ctx, 1, step, {}, 1, None)
+        handle_poll_message(ctx, 1, mk(step), {}, None)
         self.assertEqual(calls(ctx, 'sendPoll')[0]['poll'].get('open_period'),
                          60)
 
     def test_open_period_out_of_range_ignored(self):
         ctx = make_ctx()
         step = dict(FORM_POLL, poll_open_period='3')
-        handle_poll_message(ctx, 1, step, {}, 1, None)
+        handle_poll_message(ctx, 1, mk(step), {}, None)
         self.assertNotIn('open_period', calls(ctx, 'sendPoll')[0]['poll'])
 
     def test_close_date_wins_over_open_period(self):
         ctx = make_ctx()
         step = dict(FORM_POLL, poll_open_period='60',
                     poll_close_date='2030-01-01 12:00')
-        handle_poll_message(ctx, 1, step, {}, 1, None)
+        handle_poll_message(ctx, 1, mk(step), {}, None)
         poll = calls(ctx, 'sendPoll')[0]['poll']
         expected = int(datetime(2030, 1, 1, 12, 0,
                                  tzinfo=timezone.utc).timestamp())
@@ -159,7 +165,7 @@ class TestQuizHandling(unittest.TestCase):
 
     def test_form_fields_reach_send_poll(self):
         ctx = make_ctx()
-        handle_quiz_message(ctx, 1, dict(FORM_QUIZ), {}, 1, None)
+        handle_quiz_message(ctx, 1, mk(dict(FORM_QUIZ)), {}, None)
 
         sent = calls(ctx, 'sendPoll')
         self.assertEqual(len(sent), 1)
@@ -173,14 +179,14 @@ class TestQuizHandling(unittest.TestCase):
             'quiz_answer': ', '.join(f'a{i}' for i in range(11)),
             'quiz_option': '0',
         }
-        handle_quiz_message(ctx, 1, step, {}, 1, None)
+        handle_quiz_message(ctx, 1, mk(step), {}, None)
         self.assertEqual(calls(ctx, 'sendPoll'), [])
         self.assertEqual(len(calls(ctx, 'sendMessage')), 1)
 
     def test_quiz_timing(self):
         ctx = make_ctx()
         step = dict(FORM_QUIZ, quiz_open_period='3600')
-        handle_quiz_message(ctx, 1, step, {}, 1, None)
+        handle_quiz_message(ctx, 1, mk(step), {}, None)
         self.assertEqual(calls(ctx, 'sendPoll')[0]['poll'].get('open_period'),
                          3600)
 

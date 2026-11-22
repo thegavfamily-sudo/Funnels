@@ -23,8 +23,8 @@ import steps
 import subscription
 import users
 from keyboards import extract_callback_params
-from steps import StepManager, normalize_type_value
-from storage import BotContext, get_step_value
+from steps import StepManager
+from storage import BotContext
 
 logger = logging.getLogger(__name__)
 
@@ -117,16 +117,14 @@ def show_file_id(ctx: BotContext, message: dict) -> None:
 
 def handle_contact(ctx: BotContext, chat_id, user_id: Any, contact: dict) -> None:
     current_step = users.get_user_state(ctx, user_id)
-    step_data = StepManager.get_step_data(ctx, current_step)
-    if not step_data:
+    step = StepManager.get_step_data(ctx, current_step)
+    if not step:
         return
 
-    step_type = normalize_type_value(get_step_value(step_data, 'type') or '')
-    type_value = get_step_value(step_data, 'type_value') or ''
-
-    if step_type != 'input':
+    if step.type != 'input':
         return
 
+    type_value = step.type_value
     if type_value and str(type_value).strip() != '':
         contact_data = json.dumps({
             'phone_number': contact.get('phone_number') or '',
@@ -148,16 +146,14 @@ def handle_contact(ctx: BotContext, chat_id, user_id: Any, contact: dict) -> Non
 def handle_location(ctx: BotContext, chat_id, user_id: Any,
                     location: dict) -> None:
     current_step = users.get_user_state(ctx, user_id)
-    step_data = StepManager.get_step_data(ctx, current_step)
-    if not step_data:
+    step = StepManager.get_step_data(ctx, current_step)
+    if not step:
         return
 
-    step_type = normalize_type_value(get_step_value(step_data, 'type') or '')
-    type_value = get_step_value(step_data, 'type_value') or ''
-
-    if step_type != 'input':
+    if step.type != 'input':
         return
 
+    type_value = step.type_value
     if type_value and str(type_value).strip() != '':
         location_data = json.dumps({
             'latitude': location.get('latitude') or 0,
@@ -289,17 +285,13 @@ def handle_message(ctx: BotContext, message: dict) -> None:
             steps.send_step_message(ctx, chat_id, 1, user_id)
             return
 
-        step_data = StepManager.get_step_data(ctx, current_step)
+        step = StepManager.get_step_data(ctx, current_step)
 
-        if step_data:
-            step_type = normalize_type_value(
-                get_step_value(step_data, 'type') or '')
-            type_value = get_step_value(step_data, 'type_value') or ''
-
-            if step_type == 'input' and text and text.strip() != '':
-                if type_value and str(type_value).strip() != '':
+        if step:
+            if step.type == 'input' and text and text.strip() != '':
+                if step.type_value and str(step.type_value).strip() != '':
                     users.save_user_input_response(
-                        ctx, user_id, str(type_value).strip(), text.strip())
+                        ctx, user_id, str(step.type_value).strip(), text.strip())
 
                 next_step = StepManager.get_next_step(ctx, current_step)
                 if next_step > 0:
@@ -365,10 +357,8 @@ def handle_message(ctx: BotContext, message: dict) -> None:
             return
 
         if current_step > 0:
-            if step_data:
-                step_type_value = get_step_value(step_data, 'type') or ''
-                step_type = normalize_type_value(step_type_value)
-                if step_type != 'input' and text.strip() != '':
+            if step:
+                if step.type != 'input' and text.strip() != '':
                     fixed_response = functions.get_system_info_message(ctx)
                     if fixed_response and ctx.config.get('systemmessages', True):
                         processed = users.replace_tags_in_text(

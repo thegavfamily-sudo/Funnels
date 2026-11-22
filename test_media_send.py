@@ -15,7 +15,13 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from step_model import build_step  # noqa: E402
 from steps import handle_dice_message, send_media_message  # noqa: E402
+
+
+def mk(data: dict):
+    """Сырая строка шага → Step (как при загрузке воронки)."""
+    return build_step(data, 1, 'f1')
 
 
 class FakeTG:
@@ -66,7 +72,7 @@ class TestDocumentAlbum(unittest.TestCase):
     def test_two_document_urls_form_album(self):
         ctx = make_ctx()
         step = {'file_url': 'https://x.com/a.pdf, https://x.com/b.pdf'}
-        send_media_message(ctx, 1, step, 'document', {})
+        send_media_message(ctx, 1, mk(step), 'document', {})
 
         items = group_items(ctx)
         self.assertIsNotNone(items, 'ожидался sendMediaGroup')
@@ -76,7 +82,7 @@ class TestDocumentAlbum(unittest.TestCase):
     def test_single_document_is_not_album(self):
         ctx = make_ctx()
         step = {'file_url': 'https://x.com/a.pdf'}
-        send_media_message(ctx, 1, step, 'document', {})
+        send_media_message(ctx, 1, mk(step), 'document', {})
 
         methods = [m for m, _ in ctx.tg.calls]
         self.assertNotIn('sendMediaGroup', methods)
@@ -85,7 +91,7 @@ class TestDocumentAlbum(unittest.TestCase):
     def test_document_file_ids_form_album(self):
         ctx = make_ctx()
         step = {'file_id': 'AgACAgIAAxkBAA1, AgACAgIAAxkBAA2'}
-        send_media_message(ctx, 1, step, 'document', {})
+        send_media_message(ctx, 1, mk(step), 'document', {})
 
         items = group_items(ctx)
         self.assertIsNotNone(items, 'ожидался sendMediaGroup')
@@ -99,7 +105,7 @@ class TestAudioAlbum(unittest.TestCase):
     def test_two_audio_urls_form_album(self):
         ctx = make_ctx()
         step = {'file_url': 'https://x.com/a.mp3, https://x.com/b.mp3'}
-        send_media_message(ctx, 1, step, 'audio', {})
+        send_media_message(ctx, 1, mk(step), 'audio', {})
 
         items = group_items(ctx)
         self.assertIsNotNone(items, 'ожидался sendMediaGroup')
@@ -117,7 +123,7 @@ class TestAlbumCaption(unittest.TestCase):
             'content': '<b>Подпись</b>',
             'file_url': 'https://x.com/a.pdf, https://x.com/b.pdf',
         }
-        send_media_message(ctx, 1, step, 'document', {})
+        send_media_message(ctx, 1, mk(step), 'document', {})
 
         items = group_items(ctx)
         self.assertIsNotNone(items)
@@ -131,7 +137,7 @@ class TestSingleFileTypes(unittest.TestCase):
     def test_animation_multiple_urls_uses_first_only(self):
         ctx = make_ctx()
         step = {'file_url': 'https://x.com/a.gif, https://x.com/b.gif'}
-        send_media_message(ctx, 1, step, 'animation', {})
+        send_media_message(ctx, 1, mk(step), 'animation', {})
 
         methods = [m for m, _ in ctx.tg.calls]
         self.assertNotIn('sendMediaGroup', methods)
@@ -157,7 +163,7 @@ class TestCaptionSupport(unittest.TestCase):
     def _sent(self, media_type, url):
         ctx = make_ctx()
         step = {'type': media_type, 'content': 'Подпись', 'file_url': url}
-        send_media_message(ctx, 1, step, media_type, {})
+        send_media_message(ctx, 1, mk(step), media_type, {})
         return ctx
 
     def test_video_note_sends_no_caption(self):
@@ -197,7 +203,7 @@ class TestDicePayload(unittest.TestCase):
             'parse_mode': 'HTML',
             'reply_markup': {'inline_keyboard': [[{'text': 'ok'}]]},
         }
-        handle_dice_message(ctx, 1, {'dice': '🎲'}, options, 1, None)
+        handle_dice_message(ctx, 1, mk({'dice': '🎲'}), options, None)
 
         dice_calls = [args for m, args in ctx.tg.calls if m == 'sendDice']
         self.assertEqual(len(dice_calls), 1)
