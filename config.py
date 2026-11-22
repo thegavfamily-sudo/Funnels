@@ -1,21 +1,43 @@
 # ============================================================================
 # config.py — подключение Python-бота к Supabase и Telegram
 #
-# КАК ЗАПОЛНИТЬ:
-#   1) Supabase → Project Settings → API
-#   2) Project URL        → SUPABASE_URL
-#   3) service_role key   → SUPABASE_SERVICE_KEY
-#      (anon key тоже сработает — RLS в схеме выключен, но service_role
-#       правильнее для серверного скрипта)
+# Секреты НЕ хранятся в git. Читаются из окружения или из .env рядом с файлом.
 #
-# Значения ниже — ЗАГЛУШКИ. Замени на свои перед запуском.
+# .env (не коммитить):
+#   SUPABASE_URL=https://xxxxxxxx.supabase.co
+#   SUPABASE_SERVICE_KEY=sb_secret_...
 # ============================================================================
 
-# URL проекта Supabase: https://xxxxxxxx.supabase.co
-SUPABASE_URL = "https://YOUR-PROJECT.supabase.co"
+import os
+from pathlib import Path
 
-# service_role ключ (Secret) из Project Settings → API
-SUPABASE_SERVICE_KEY = "YOUR-SERVICE-ROLE-KEY"
+
+def _load_dotenv() -> None:
+    """Минимальный загрузчик .env без внешних зависимостей."""
+    env_path = Path(__file__).resolve().parent / '.env'
+    if not env_path.is_file():
+        return
+    for line in env_path.read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
+# URL проекта Supabase (не секрет): https://xxxxxxxx.supabase.co
+SUPABASE_URL = os.environ.get(
+    'SUPABASE_URL',
+    'https://wbjzxljiwinddowwzxkf.supabase.co',
+)
+
+# service_role ключ — только из окружения / .env, не из git
+SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
 
 # ---------------------------------------------------------------------------
 # Настройки бота

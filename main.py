@@ -194,10 +194,10 @@ def sync_bots(storage: Storage, workers: dict[str, BotWorker]) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    if 'YOUR-PROJECT' in config.SUPABASE_URL or 'YOUR-' in config.SUPABASE_SERVICE_KEY:
+    if 'YOUR-PROJECT' in config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
         logger.warning(
-            'config.py содержит ЗАГЛУШКИ Supabase — вставьте свой Project URL '
-            'и service_role ключ перед запуском.')
+            'Supabase не настроен: задайте SUPABASE_URL и SUPABASE_SERVICE_KEY '
+            'в .env или переменных окружения.')
 
     client = SupabaseClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
     storage = Storage(client)
