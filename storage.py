@@ -135,20 +135,106 @@ def iso_now() -> str:
 
 
 def is_funnel_served(funnel_row: dict) -> bool:
-    """Условие обслуживания: token непустой AND data.cache != false
-    AND lowercase(status) != 'archived'. Inactive НЕ останавливает бота."""
+    """Условие обслуживания: token непустой AND lowercase(status) != 'archived'.
+
+    Status управляет режимом, а не питанием бота (как Cache:Active/Inactive
+    в оригинале): Active — ответы из кэша памяти, Inactive — бот работает,
+    но перечитывает воронку из таблицы напрямую, Archived — не обслуживается.
+    """
     token = str(funnel_row.get('token') or '').strip()
     if not token:
         return False
     data = funnel_row.get('data') or {}
     if not isinstance(data, dict):
         return False
-    if not parse_bot_flags(data).get('cache', True):
-        return False
-    status = str(data.get('status') or '').strip().lower()
-    if status == 'archived':
-        return False
-    return True
+    return str(data.get('status') or '').strip().lower() != 'archived'
+
+
+def build_step_entry(row: dict) -> Optional[tuple]:
+    """(funnel_id, step_number, step_data, reply_kb, inline_kb) для строки steps.
+
+    Одна индексация используется и refresh (наполнение кэшей), и режимом
+    Inactive (прямое чтение таблицы шагов). None — строка не проходит.
+    """
+    step_data = dict(row.get('data') or {})
+    row_funnel_id = str(row.get('funnel_id') or '').strip() or \
+        str(step_data.get('funnel_id') or '').strip()
+    if not row_funnel_id:
+        return None
+
+    step_value = row.get('step')
+    if step_value is None or step_value == '':
+        step_value = step_data.get('step')
+    step_number = parse_step_number(step_value)
+    if step_number is None or step_number <= 0:
+        return None
+
+    file_id = step_data.get('file_id')
+    if isinstance(file_id, str):
+        step_data['file_id'] = clean_file_id(file_id)
+    step_data['step'] = step_number
+    step_data['funnel_id'] = row_funnel_id
+
+    # Reply keyboard (cacheReplyKeyboards :2976)
+    reply_kb = None
+    keyboard_str = get_step_value(step_data, 'regular_keyboard')
+    if keyboard_str and str(keyboard_str).strip():
+        parsed = keyboards.parse_regular_keyboard_data(keyboard_str)
+        if parsed and parsed['buttons']:
+            reply_kb = {
+                'parsedData': parsed,
+                'step': step_number,
+                'funnelId': row_funnel_id,
+            }
+
+    # Inline keyboard (cacheInlineKeyboards :3449)
+    inline_kb = None
+    inline_str = get_step_value(step_data, 'inline_keyboard')
+    if inline_str and str(inline_str).strip():
+        channel = get_step_value(step_data, 'channel')
+        subscription = get_step_value(step_data, 'subscription')
+        no_subscription = get_step_value(step_data, 'no_subscription')
+        parsed = keyboards.parse_inline_keyboard_data(inline_str)
+        if parsed and parsed['buttons']:
+            built = keyboards.build_inline_keyboard_from_parsed_data(
+                parsed, channel)
+            inline_kb = {
+                'inlineKeyboard': built,
+                'step': step_number,
+                'funnelId': row_funnel_id,
+                'channel': channel or '',
+                'subscriptionMessage': subscription or '',
+                'noSubscriptionMessage': no_subscription or '',
+                'parsedData': parsed,
+            }
+
+    return row_funnel_id, step_number, step_data, reply_kb, inline_kb
+
+
+def system_messages_from(entries: list) -> dict:
+    """Ключи `${funnel_id}_${type}` → сообщение (cacheSystemMessages :3528)."""
+    out: dict[str, str] = {}
+    for entry in entries:
+        data = entry.get('data') or {}
+        row_type = str(data.get('type') or '').strip()
+        row_name = str(data.get('function_name') or '').strip()
+        row_message = str(data.get('message') or '').strip()
+        row_funnel_id = str(entry.get('funnel_id') or '').strip()
+
+        is_system = (
+            row_type == 'Funnel system'
+            or row_name in (config.SYSTEM_MESSAGE_INFO, config.SYSTEM_MESSAGE_FINAL)
+            or (row_type == 'System'
+                and row_name in (config.SYSTEM_MESSAGE_INFO,
+                                 config.SYSTEM_MESSAGE_FINAL))
+        )
+        if row_message and (is_system or row_type == 'Funnel system'):
+            if row_type == 'Funnel system':
+                out[f'{row_funnel_id}_Funnel system'] = row_message
+            if row_name:
+                out[f'{row_funnel_id}_{row_name}'] = row_message
+                out[f'{row_funnel_id}_{row_type}'] = row_message
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +278,8 @@ class Storage:
         self.funnel_names: dict[str, str] = {}          # funnel_id → name
         self.functions_rows: list[dict] = []            # {id, funnel_id, data}
         self.cache_timestamp: float = 0.0
+        # Status Inactive: воронки, чьи данные читаем из таблицы, без кэша
+        self._direct_funnels: set[str] = set()
 
         # Юзеры: read-through dict по (funnel_id, user_id)
         self._users: dict[tuple, Optional[dict]] = {}
@@ -213,6 +301,7 @@ class Storage:
 
         active: dict[str, dict] = {}
         funnel_names: dict[str, str] = {}
+        direct: set[str] = set()
         for row in funnels:
             data = row.get('data') or {}
             funnel_id = str(row.get('id') or '').strip()
@@ -228,8 +317,8 @@ class Storage:
                 logger.error('[refresh] Invalid token for funnel %s', funnel_id)
                 continue
             flags = parse_bot_flags(data)
-            if not flags['cache']:
-                continue
+            if str(data.get('status') or '').strip().lower() == 'inactive':
+                direct.add(funnel_id)
             active[bot_id] = {
                 'funnel_id': funnel_id,
                 'funnel_name': name,
@@ -256,58 +345,18 @@ class Storage:
         inline_keyboards: dict[str, dict] = {}
 
         for row in steps_rows:
-            step_data = dict(row.get('data') or {})
-            row_funnel_id = str(row.get('funnel_id') or '').strip() or \
-                str(step_data.get('funnel_id') or '').strip()
-            if not row_funnel_id or row_funnel_id not in active_funnel_ids:
+            entry = build_step_entry(row)
+            if entry is None:
                 continue
-
-            step_value = row.get('step')
-            if step_value is None or step_value == '':
-                step_value = step_data.get('step')
-            step_number = parse_step_number(step_value)
-            if step_number is None or step_number <= 0:
+            row_funnel_id, step_number, step_data, reply_kb, inline_kb = entry
+            if row_funnel_id not in active_funnel_ids:
                 continue
-
-            file_id = step_data.get('file_id')
-            if isinstance(file_id, str):
-                step_data['file_id'] = clean_file_id(file_id)
-
-            step_data['step'] = step_number
-            step_data['funnel_id'] = row_funnel_id
             cache_key = f'{row_funnel_id}_{step_number}'
             steps_cache[cache_key] = step_data
-
-            # Reply keyboard (cacheReplyKeyboards :2976)
-            keyboard_str = get_step_value(step_data, 'regular_keyboard')
-            if keyboard_str and str(keyboard_str).strip():
-                parsed = keyboards.parse_regular_keyboard_data(keyboard_str)
-                if parsed and parsed['buttons']:
-                    reply_keyboards[cache_key] = {
-                        'parsedData': parsed,
-                        'step': step_number,
-                        'funnelId': row_funnel_id,
-                    }
-
-            # Inline keyboard (cacheInlineKeyboards :3449)
-            inline_str = get_step_value(step_data, 'inline_keyboard')
-            if inline_str and str(inline_str).strip():
-                channel = get_step_value(step_data, 'channel')
-                subscription = get_step_value(step_data, 'subscription')
-                no_subscription = get_step_value(step_data, 'no_subscription')
-                parsed = keyboards.parse_inline_keyboard_data(inline_str)
-                if parsed and parsed['buttons']:
-                    built = keyboards.build_inline_keyboard_from_parsed_data(
-                        parsed, channel)
-                    inline_keyboards[cache_key] = {
-                        'inlineKeyboard': built,
-                        'step': step_number,
-                        'funnelId': row_funnel_id,
-                        'channel': channel or '',
-                        'subscriptionMessage': subscription or '',
-                        'noSubscriptionMessage': no_subscription or '',
-                        'parsedData': parsed,
-                    }
+            if reply_kb is not None:
+                reply_keyboards[cache_key] = reply_kb
+            if inline_kb is not None:
+                inline_keyboards[cache_key] = inline_kb
 
         # Functions + системные сообщения (cacheSystemMessages :3528)
         try:
@@ -316,7 +365,6 @@ class Storage:
             logger.error('[refresh] Ошибка чтения functions: %s', error)
             functions_rows = []
 
-        system_messages: dict[str, str] = {}
         normalized_functions: list[dict] = []
         for row in functions_rows:
             data = row.get('data') or {}
@@ -329,27 +377,7 @@ class Storage:
         # Сид системных функций (function_seed.py): если в Supabase их нет —
         # подставляем, чтобы бот работал и без отдельной вставки в базу.
         normalized_functions = merge_function_seeds(normalized_functions)
-
-        for entry in normalized_functions:
-            data = entry['data'] or {}
-            row_type = str(data.get('type') or '').strip()
-            row_name = str(data.get('function_name') or '').strip()
-            row_message = str(data.get('message') or '').strip()
-            row_funnel_id = entry['funnel_id']
-
-            is_system = (
-                row_type == 'Funnel system'
-                or row_name in (config.SYSTEM_MESSAGE_INFO, config.SYSTEM_MESSAGE_FINAL)
-                or (row_type == 'System'
-                    and row_name in (config.SYSTEM_MESSAGE_INFO,
-                                     config.SYSTEM_MESSAGE_FINAL))
-            )
-            if row_message and (is_system or row_type == 'Funnel system'):
-                if row_type == 'Funnel system':
-                    system_messages[f'{row_funnel_id}_Funnel system'] = row_message
-                if row_name:
-                    system_messages[f'{row_funnel_id}_{row_name}'] = row_message
-                    system_messages[f'{row_funnel_id}_{row_type}'] = row_message
+        system_messages = system_messages_from(normalized_functions)
 
         with self._lock:
             self.active_funnels = active
@@ -359,6 +387,7 @@ class Storage:
             self.system_messages_cache = system_messages
             self.funnel_names = funnel_names
             self.functions_rows = normalized_functions
+            self._direct_funnels = direct
             self.cache_timestamp = time.time()
 
         self.cleanup_game_caches()
@@ -398,6 +427,74 @@ class Storage:
                 if entry['funnel_id'] in ('', funnel_id):
                     return row_message
         return ''
+
+    # -- режим Inactive: прямое чтение из таблицы --------------------------
+
+    def is_direct(self, funnel_id: str) -> bool:
+        """True — статус Inactive: данные воронки читаем из Supabase,
+        а не из кэша памяти (как Cache:Inactive в оригинале)."""
+        with self._lock:
+            return funnel_id in self._direct_funnels
+
+    def refresh_if_direct(self, funnel_id: str) -> None:
+        """Перед обработкой апдейта: для Inactive-воронки перечитать шаги,
+        клавиатуры и системные сообщения напрямую из таблицы."""
+        if not funnel_id or not self.is_direct(funnel_id):
+            return
+        self.reload_funnel(funnel_id)
+
+    def reload_funnel(self, funnel_id: str) -> None:
+        """Заменить кэш воронки её свежими строками из Supabase."""
+        try:
+            steps_rows = self.client.select(
+                'steps', filters={'funnel_id': f'eq.{funnel_id}'})
+            functions_rows = self.client.select(
+                'functions', filters={'funnel_id': f'eq.{funnel_id}'})
+        except Exception as error:
+            # Сеть недоступна — отвечаем из прошлого кэша, а не падаем.
+            logger.error('[direct] Ошибка чтения воронки %s: %s', funnel_id, error)
+            return
+
+        prefix = f'{funnel_id}_'
+        new_steps: dict[str, dict] = {}
+        new_reply: dict[str, dict] = {}
+        new_inline: dict[str, dict] = {}
+        for row in steps_rows:
+            entry = build_step_entry(row)
+            if entry is None:
+                continue
+            row_fid, step_number, step_data, reply_kb, inline_kb = entry
+            if row_fid != funnel_id:
+                continue
+            key = f'{row_fid}_{step_number}'
+            new_steps[key] = step_data
+            if reply_kb is not None:
+                new_reply[key] = reply_kb
+            if inline_kb is not None:
+                new_inline[key] = inline_kb
+
+        new_functions = [{
+            'id': str(row.get('id') or ''),
+            'funnel_id': funnel_id,
+            'data': row.get('data') or {},
+        } for row in functions_rows]
+        new_messages = system_messages_from(new_functions)
+
+        def without_funnel(cache: dict) -> dict:
+            # Префикс со знаком подчёркивания: 'f1_' не захватит 'f10_…'
+            return {k: v for k, v in cache.items() if not k.startswith(prefix)}
+
+        with self._lock:
+            self.steps_cache = {**without_funnel(self.steps_cache), **new_steps}
+            self.reply_keyboards_cache = {
+                **without_funnel(self.reply_keyboards_cache), **new_reply}
+            self.inline_keyboards_cache = {
+                **without_funnel(self.inline_keyboards_cache), **new_inline}
+            self.system_messages_cache = {
+                **without_funnel(self.system_messages_cache), **new_messages}
+            self.functions_rows = [
+                e for e in self.functions_rows if e['funnel_id'] != funnel_id
+            ] + new_functions
 
     # -- юзеры (read-through) ----------------------------------------------
 

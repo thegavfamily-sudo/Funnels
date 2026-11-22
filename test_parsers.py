@@ -18,7 +18,7 @@ from keyboards import (extract_callback_params,  # noqa: E402
                        parse_regular_keyboard_data)
 from steps import get_slot_symbols, normalize_type_value, parse_poll_data, \
     parse_quiz_data  # noqa: E402
-from storage import parse_bot_flags  # noqa: E402
+from storage import is_funnel_served, parse_bot_flags  # noqa: E402
 import users  # noqa: E402
 
 
@@ -372,6 +372,35 @@ class TestExtractSourceCodes(unittest.TestCase):
             users.ReferralManager.extract_source_codes_from_start_command(
                 '/start src_'),
             (None, None))
+
+
+class TestIsFunnelServed(unittest.TestCase):
+    """Статус управляет режимом бота, а не питанием (кроме Archived).
+
+    Active — кэш памяти, Inactive — обслуживается и читает таблицу
+    напрямую, Archived — не обслуживается.
+    """
+
+    @staticmethod
+    def _row(**data):
+        return {'token': '123456:ABC-DEF', 'data': data}
+
+    def test_active_served(self):
+        self.assertTrue(is_funnel_served(self._row(status='Active')))
+
+    def test_inactive_still_served(self):
+        self.assertTrue(is_funnel_served(
+            self._row(status='Inactive', cache=False)))
+
+    def test_empty_status_served(self):
+        self.assertTrue(is_funnel_served(self._row()))
+
+    def test_archived_not_served(self):
+        self.assertFalse(is_funnel_served(self._row(status='Archived')))
+
+    def test_no_token_not_served(self):
+        self.assertFalse(is_funnel_served(
+            {'token': '', 'data': {'status': 'Active'}}))
 
 
 if __name__ == '__main__':

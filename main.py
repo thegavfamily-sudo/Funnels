@@ -76,6 +76,9 @@ def dispatch_poll_answer(ctx: BotContext, poll_answer: dict) -> None:
 
 
 def dispatch_update(ctx: BotContext, update: dict) -> None:
+    # Inactive: воронка читается из таблицы напрямую — обновляем её кэш
+    # перед каждым апдейтом, не дожидаясь периодического refresh.
+    ctx.storage.refresh_if_direct(ctx.funnel_id)
     if update.get('poll_answer'):
         dispatch_poll_answer(ctx, update['poll_answer'])
         return
