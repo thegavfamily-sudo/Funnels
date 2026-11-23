@@ -49,6 +49,14 @@ class TestParseMenuCommands(unittest.TestCase):
         result = parse_menu_commands('плохая команда, Start, start, ok')
         self.assertEqual([c['command'] for c in result], ['Start', 'ok'])
 
+    def test_newline_separator(self):
+        # Поле в админке многострочное: одна команда в строке.
+        result = parse_menu_commands('start: Запустить бота\nhelp: Помощь')
+        self.assertEqual(result, [
+            {'command': 'start', 'description': 'Запустить бота'},
+            {'command': 'help', 'description': 'Помощь'},
+        ])
+
     def test_empty(self):
         self.assertEqual(parse_menu_commands(''), [])
         self.assertEqual(parse_menu_commands(None), [])

@@ -29,11 +29,13 @@ _COMMAND_RE = re.compile(r'^[A-Za-z0-9_]{1,32}$')
 def parse_menu_commands(raw: Any) -> list[dict]:
     """Список команд: 'start: Запустить, help: Помощь' → [{command, description}].
 
-    Без двоеточия описание = имя команды. Пустые/невалидные имена пропускаются.
+    Разделители — запятая и перевод строки (в админке поле многострочное,
+    удобно писать одну команду в строку). Без двоеточия описание = имя
+    команды. Пустые/невалидные имена пропускаются.
     """
     commands: list[dict] = []
     seen: set[str] = set()
-    for part in str(raw or '').split(','):
+    for part in re.split(r'[,\n]', str(raw or '')):
         part = part.strip()
         if not part:
             continue

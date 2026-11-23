@@ -42,18 +42,39 @@ logger = logging.getLogger(__name__)
 # Кости / слоты: рантайм значения броска (конфиг ветвления — в Step.dice)
 # ---------------------------------------------------------------------------
 
-def get_dice_step_from_value(dice_value: Any, logic_values: Optional[list],
-                             step_mapping: Optional[list]) -> int:
+# Длительность анимации sendDice в клиенте Telegram (сек) — с запасом, чтобы
+# переход (следующий шаг) не приходил раньше её окончания; далее
+# process_dice_result добавляет ~1 с паузы, как в предпросмотре.
+# Слоты крутятся дольше.
+DICE_ANIMATION_SECONDS = {'🎰': 3.5}
+DICE_ANIMATION_DEFAULT_SECONDS = 2.0
+
+
+def dice_animation_seconds(emoji: Any) -> float:
+    return DICE_ANIMATION_SECONDS.get(emoji, DICE_ANIMATION_DEFAULT_SECONDS)
+
+
+def resolve_dice_next_step(step: Step, dice_value: Any) -> Optional[int]:
+    """Явный маппинг «исход → шаг» из конфига dice.
+
+    None — маппинга нет или у исхода нет пары (вызывающий идёт на следующий
+    шаг); int — ответ конфига, 0 = без перехода (воронка завершается), как
+    в форме админки («Без перехода»).
+    """
+    logic_values = step.dice.logic_values
+    step_mapping = step.dice.steps
     if not logic_values or not step_mapping \
             or len(logic_values) != len(step_mapping):
-        return 0
-    try:
-        index = logic_values.index(dice_value)
-    except ValueError:
-        return 0
-    if 0 <= index < len(step_mapping):
-        return step_mapping[index]
-    return 0
+        return None
+    lookup = dice_value
+    if step.dice.emoji == '🎰':
+        # 🎰: логическое значение — номер комбинации (0 = разные символы).
+        symbols = get_slot_symbols(dice_value)
+        lookup = (get_same_symbol_number(symbols)
+                  if are_all_symbols_same(symbols) else 0)
+    if lookup not in logic_values:
+        return None
+    return step_mapping[logic_values.index(lookup)]
 
 
 def get_slot_symbols(dice_value: int) -> str:
@@ -310,33 +331,17 @@ def process_dice_result(ctx: BotContext, message_id: Any) -> bool:
         # Формула из шага (calc_formula) — авто-расчёт по тегам.
         _run_step_calc(ctx, chat_id, user_id, step)
 
-        next_step = 0
-        logic_values = step.dice.logic_values
-        step_mapping = step.dice.steps
-        if logic_values and step_mapping \
-                and len(logic_values) == len(step_mapping):
-            if dice_emoji == '🎰':
-                symbols = get_slot_symbols(dice_value)
-                if are_all_symbols_same(symbols):
-                    next_step = get_dice_step_from_value(
-                        get_same_symbol_number(symbols),
-                        logic_values, step_mapping)
-                else:
-                    next_step = get_dice_step_from_value(
-                        0, logic_values, step_mapping)
-            else:
-                next_step = get_dice_step_from_value(
-                    dice_value, logic_values, step_mapping)
-
-        if next_step <= 0:
-            if dice_emoji == '🎰':
-                symbols = get_slot_symbols(dice_value)
-                if not are_all_symbols_same(symbols):
-                    next_step = StepManager.get_next_step(ctx, step.number)
-            else:
-                next_step = StepManager.get_next_step(ctx, step.number)
+        # Явный маппинг «исход → шаг»: 0 = без перехода (конец воронки).
+        # Маппинга нет или у исхода нет пары — как раньше, следующий шаг.
+        resolved = resolve_dice_next_step(step, dice_value)
+        if resolved is not None:
+            next_step = resolved
+        else:
+            next_step = StepManager.get_next_step(ctx, step.number)
 
         dice_result['processed'] = True
+        # Пауза после броска: анимацию handle_dice_message уже выждал,
+        # здесь ~1 с до отправки следующего шага (как в предпросмотре).
         time.sleep(1)
 
         if next_step > 0:
@@ -389,15 +394,19 @@ def process_poll_result(ctx: BotContext, poll_id: str, target: str = 'poll') -> 
         # Формула из шага (calc_formula) — авто-расчёт по тегам.
         _run_step_calc(ctx, poll_result['chatId'], poll_result['userId'], step)
 
+        # Режимы формы как у dice: no_transition («Без перехода» из чипов)
+        # — воронка завершается; иначе маппинг «ответ → шаг» как раньше
+        # (>0 — переход, 0/нет пары — следующий шаг).
+        no_transition = bool(cfg is not None and cfg.no_transition)
         next_step = 0
-        if logic_values and steps_list \
-                and 0 <= selected_option < len(logic_values):
-            # Как в JS: steps[selected] может отсутствовать → undefined → 0.
-            next_step = (steps_list[selected_option]
-                         if selected_option < len(steps_list) else 0) or 0
-
-        if next_step <= 0:
-            next_step = StepManager.get_next_step(ctx, step.number)
+        if not no_transition:
+            if logic_values and steps_list \
+                    and 0 <= selected_option < len(logic_values):
+                # Как в JS: steps[selected] может отсутствовать → undefined → 0.
+                next_step = (steps_list[selected_option]
+                             if selected_option < len(steps_list) else 0) or 0
+            if next_step <= 0:
+                next_step = StepManager.get_next_step(ctx, step.number)
 
         poll_result['processed'] = True
         time.sleep(0.5)
@@ -795,11 +804,14 @@ def handle_dice_message(ctx: BotContext, chat_id, step: Step, options: dict,
         if dice_result.get('dice_value'):
             add_dice_result(ctx, message_id, user_id, chat_id,
                             dice_result['dice_value'], step)
-            time.sleep(1)
+            # Ждём окончания анимации броска — переход (следующий шаг
+            # внутри process_dice_result) не должен приходить во время неё.
+            time.sleep(dice_animation_seconds(dice_emoji))
             process_dice_result(ctx, message_id)
         else:
             add_dice_result(ctx, message_id, user_id, chat_id, 0, step)
-            timer = threading.Timer(3.0, check_dice_result,
+            timer = threading.Timer(dice_animation_seconds(dice_emoji),
+                                    check_dice_result,
                                     args=(ctx, message_id, chat_id))
             timer.daemon = True
             timer.start()

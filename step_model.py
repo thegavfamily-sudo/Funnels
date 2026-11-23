@@ -482,6 +482,7 @@ class PollConfig:
     anonymous: bool = True
     logic_values: list[int] = field(default_factory=list)
     steps: list[int] = field(default_factory=list)
+    no_transition: bool = False     # «Без перехода»: воронка завершается
     open_period: Optional[int] = None
     close_date: Optional[int] = None
 
@@ -496,6 +497,7 @@ class QuizConfig:
     anonymous: bool = True
     logic_values: list[int] = field(default_factory=list)
     steps: list[int] = field(default_factory=list)
+    no_transition: bool = False     # «Без перехода»: воронка завершается
     open_period: Optional[int] = None
     close_date: Optional[int] = None
 
@@ -630,6 +632,7 @@ def _build_poll(data: dict) -> Optional[PollConfig]:
             logic_values=_int_list(poll_raw.get('logic_values')),
             # steps выровнен с answers: 0 = ветки нет (как '' в старом CSV).
             steps=_int_list(poll_raw.get('steps')),
+            no_transition=_as_bool(poll_raw.get('no_transition')),
             open_period=_timing_period(poll_raw.get('open_period')),
             close_date=_timing_close(poll_raw.get('close_date')),
         )
@@ -648,6 +651,8 @@ def _build_poll(data: dict) -> Optional[PollConfig]:
         anonymous=parsed['anonymous'],
         logic_values=parsed['logicValues'],
         steps=parsed['steps'],
+        no_transition=_as_bool(
+            get_step_value(data, 'poll_no_transition')),
         open_period=timing.get('open_period'),
         close_date=timing.get('close_date'),
     )
@@ -669,6 +674,7 @@ def _build_quiz(data: dict) -> Optional[QuizConfig]:
             logic_values=_int_list(quiz_raw.get('logic_values')),
             # steps выровнен с answers: 0 = ветки нет.
             steps=_int_list(quiz_raw.get('steps')),
+            no_transition=_as_bool(quiz_raw.get('no_transition')),
             open_period=_timing_period(quiz_raw.get('open_period')),
             close_date=_timing_close(quiz_raw.get('close_date')),
         )
@@ -687,6 +693,8 @@ def _build_quiz(data: dict) -> Optional[QuizConfig]:
         anonymous=parsed['anonymous'],
         logic_values=parsed['logicValues'],
         steps=parsed['steps'],
+        no_transition=_as_bool(
+            get_step_value(data, 'quiz_no_transition')),
         open_period=timing.get('open_period'),
         close_date=timing.get('close_date'),
     )
