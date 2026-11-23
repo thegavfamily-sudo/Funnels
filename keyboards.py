@@ -12,9 +12,11 @@
 #
 # Форматы строк (НЕ менять):
 #   regular: строки через '||', кнопки через ',', поля через '|':
-#            text|type|command|role; хвост 'action:...' — настройки
+#            text|type|command[|step]; хвост 'action:...' — настройки;
+#            у command 4-е число-поле — шаг после функции (иначе role).
 #   inline:  строки через '||', кнопки через ',', поля через '|':
-#            text|type|step|method|action|points|role
+#            text|type|step|method|action; у command 6-е поле — целевой
+#            шаг после функции (legacy points/role не используются).
 # ============================================================================
 
 from __future__ import annotations
@@ -96,6 +98,7 @@ def parse_regular_keyboard_data(regular_keyboard_str: Any) -> Optional[dict]:
                     'type': 'text',
                     'command': '',
                     'role': '',
+                    'step': 0,
                 }
 
                 if len(button_parts) > 1 and button_parts[1]:
@@ -107,7 +110,25 @@ def parse_regular_keyboard_data(regular_keyboard_str: Any) -> Optional[dict]:
                     button_data['command'] = button_parts[2]
 
                 if len(button_parts) > 3 and button_parts[3]:
-                    button_data['role'] = button_parts[3].lower()
+                    if button_data['type'] == 'command':
+                        # У command 4-е поле — шаг после функции, если число
+                        # (иначе — role, как в старом формате).
+                        step_value = _parse_int_js(button_parts[3])
+                        if step_value is not None and step_value > 0:
+                            button_data['step'] = step_value
+                        else:
+                            button_data['role'] = button_parts[3].lower()
+                    else:
+                        button_data['role'] = button_parts[3].lower()
+
+                # 5-е поле: role (если 4-е было шагом) + step у command.
+                if button_data['type'] == 'command' \
+                        and len(button_parts) > 4 and button_parts[4]:
+                    step_value = _parse_int_js(button_parts[4])
+                    if step_value is not None and step_value > 0:
+                        button_data['step'] = step_value
+                    else:
+                        button_data['role'] = button_parts[4].lower()
 
                 row_buttons.append(button_data)
 
@@ -206,8 +227,6 @@ def parse_inline_keyboard_data(inline_keyboard_str: Any) -> Optional[dict]:
                     'step': 0,
                     'method': 'step by step',
                     'action': 'keep',
-                    'points': 0,
-                    'role': '',
                 }
 
                 param_index = 1
@@ -243,14 +262,13 @@ def parse_inline_keyboard_data(inline_keyboard_str: Any) -> Optional[dict]:
                     if action_value in ('hide', 'remove', 'delete', 'keep'):
                         button_data['action'] = action_value
 
+                # 6-е поле: у command/web app — целевой шаг.
                 if len(parts) > param_index:
-                    points_value = _parse_int_js(parts[param_index])
+                    slot6 = _parse_int_js(parts[param_index])
                     param_index += 1
-                    if points_value is not None and points_value > 0:
-                        button_data['points'] = points_value
-
-                if len(parts) > param_index and parts[param_index]:
-                    button_data['role'] = parts[param_index].lower()
+                    if button_data['type'] in ('command', 'web app') \
+                            and slot6 is not None and slot6 > 0:
+                        button_data['step'] = slot6
 
                 row_buttons.append(button_data)
 
@@ -315,10 +333,14 @@ def build_inline_keyboard_from_parsed_data(parsed_data: Optional[dict],
                 elif button_type == 'command':
                     cmd_source = payload or button_text
                     cmd_value = cmd_source[1:] if cmd_source.startswith('/') else cmd_source
+                    # step > 0 — после execute_function перейти на шаг.
+                    step_after = (
+                        f'_step_{step_number}' if step_number > 0 else '')
                     button = {'text': button_text,
                               'callback_data': (
                                   f'cmd_{cmd_value}_row_{row_index}'
-                                  f'_col_{col_index}_action_{action}')}
+                                  f'_col_{col_index}_action_{action}'
+                                  f'{step_after}')}
                 else:  # callback / default
                     button = {'text': button_text,
                               'callback_data': (
@@ -400,6 +422,10 @@ def extract_callback_params(callback_data: str) -> dict:
                 params['col'] = parts[i + 1]
             elif part == 'action' and i + 1 < len(parts):
                 params['action'] = parts[i + 1]
+            elif part == 'step' and i > 0 and i + 1 < len(parts):
+                # Целевой шаг после вызова функции (хвост callback).
+                # i > 0: сам cmd может называться «step».
+                params['step'] = parts[i + 1]
             elif i == 0:
                 params['cmd'] = part
 

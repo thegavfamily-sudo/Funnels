@@ -6,10 +6,6 @@
 #   Utils.getSystemMessage              :817
 #   getFunctionConfigFromSheet          :5184
 #   executeFunctionFromSheet            :5246
-#
-# Формулы по таблицам (executeLogicalFormula / executeSingleFormula),
-# авторизация и чтение внешних таблиц из этого модуля убраны: воронка
-# работает с одной таблицей, а считает «Расчёт» (calc) по тегам юзера.
 # ============================================================================
 
 from __future__ import annotations
@@ -50,6 +46,13 @@ def get_system_final_message(ctx: BotContext) -> str:
 
 def get_function_config(ctx: BotContext, function_name: str) -> Optional[dict]:
     """Порт getFunctionConfigFromSheet (:5184) по Function name."""
+
+    def _int_field(value: Any) -> int:
+        try:
+            return int(str(value or '').strip() or 0)
+        except ValueError:
+            return 0
+
     for entry in ctx.storage.functions_rows:
         data = entry['data'] or {}
         row_name = str(data.get('function_name') or '').strip()
@@ -64,6 +67,9 @@ def get_function_config(ctx: BotContext, function_name: str) -> Optional[dict]:
             'message': str(data.get('message') or '').strip(),
             'condition': str(data.get('condition') or '').strip(),
             'function_param': str(data.get('function') or '').strip(),
+            # Условие: шаги ветки (0 — без перехода).
+            'step_yes': _int_field(data.get('step_yes')),
+            'step_no': _int_field(data.get('step_no')),
         }
     return None
 
@@ -326,7 +332,9 @@ def _cond_compare(raw: Any, op: str, rhs: Any) -> bool:
 
 
 def execute_condition(ctx: BotContext, user_id: Any, condition: str,
-                      yes_text: str, no_text: str) -> dict:
+                      yes_text: str, no_text: str,
+                      step_yes: int = 0, step_no: int = 0) -> dict:
+    """Проверка тега → текст ветки + целевой шаг ('step', 0 — без перехода)."""
     try:
         if not user_id:
             return {'success': False,
@@ -338,11 +346,14 @@ def execute_condition(ctx: BotContext, user_id: Any, condition: str,
         tag, op, rhs = parsed
         row = ctx.storage.get_user(ctx.funnel_id, user_id)
         data: dict = dict(row.get('data') or {}) if row else {}
-        text = yes_text if _cond_compare(data.get(tag), op, rhs) else no_text
+        ok = _cond_compare(data.get(tag), op, rhs)
+        step = step_yes if ok else step_no
+        text = yes_text if ok else no_text
         if not str(text or '').strip():
-            return {'success': True, 'message': ''}
+            return {'success': True, 'message': '', 'step': step}
         return {'success': True,
-                'message': users.replace_tags_in_text(ctx, text, user_id)}
+                'message': users.replace_tags_in_text(ctx, text, user_id),
+                'step': step}
     except Exception as error:  # noqa: BLE001
         logger.error('[executeCondition] %s', error)
         return {'success': False, 'message': f'❌ Ошибка проверки: {error}'}
@@ -376,7 +387,9 @@ def execute_function(ctx: BotContext, function_name: str, user_id: Any,
     if func_type == 'condition':
         return execute_condition(ctx, user_id, func_config['condition'],
                                  func_config['message'],
-                                 func_config['function_param'])
+                                 func_config['function_param'],
+                                 step_yes=func_config.get('step_yes', 0),
+                                 step_no=func_config.get('step_no', 0))
 
     return {'success': False,
             'message': f'❌ Неизвестный тип функции: {func_type}'}

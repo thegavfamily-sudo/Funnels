@@ -239,21 +239,6 @@ def get_initial_text(content: Any) -> str:
     return _render(content, outer, states)
 
 
-def extract_pure_text(effect_content: Any) -> Any:
-    """Снять все теги, оставив содержимое (Utils.extractPureText :729)."""
-    if not effect_content or not isinstance(effect_content, str):
-        return effect_content
-
-    text = effect_content
-    effects = parse_effects(text)
-    if effects:
-        for effect in sorted(effects, key=lambda e: -e['start_index']):
-            text = (text[:effect['start_index']]
-                    + effect['inner_content']
-                    + text[effect['start_index'] + len(effect['full_content']):])
-    return text
-
-
 # ---------------------------------------------------------------------------
 # Проигрывание (EffectsHandler, порт :6330 — теперь для всех тегов сразу)
 # ---------------------------------------------------------------------------

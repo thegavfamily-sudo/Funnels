@@ -524,9 +524,9 @@ class Step:
     """Шаг воронки в нормальном виде: типизированные поля вместо колонок.
 
     Пустые/магические значения старой таблицы уже преобразованы:
-      next_step '' → next=None (переход последовательный, current+1);
-      next_step '0' → next=0 (явного перехода нет; при scroll=auto — конец),
-      scroll 'auto' → auto=True,
+      next_step '' → next=None (без авто-перехода; у интерактива — current+1);
+      next_step '0' → next=0 (при scroll=auto — конец воронки),
+      scroll 'auto' → auto=True (переход только если задан next_step > 0),
       delay '0'     → delay=0.0,
       pin 'TRUE'    → pin=True.
     """
@@ -535,7 +535,7 @@ class Step:
     type: str = ''                     # нормализованный тип (text/poll/…)
     type_value: str = ''               # исходное имя типа (для input-сохранения)
     text: str = ''                     # контент; теги подставляются при отправке
-    next: Optional[int] = None         # явный переход; None → current+1
+    next: Optional[int] = None         # явный переход; None → у интерактива current+1
     auto: bool = False                 # scroll == 'auto' — автопереход
     delay: float = 0.0                 # пауза перед автопереходом, сек
     pin: bool = False                  # закрепить сообщение
@@ -830,8 +830,8 @@ def build_step(data: Optional[dict], number: int, funnel_id: str) -> Step:
         inline_keyboard=_build_inline_keyboard(raw, number, funnel_id),
     )
 
-    # Явный переход: пусто → None (значит current+1); непустое значение
-    # парсим (в т.ч. '0' — «перехода нет» для scroll=auto, как в оригинале).
+    # Явный переход: пусто → None (у интерактива current+1; при auto — без
+    # перехода); непустое значение парсим (в т.ч. '0' — конец при auto).
     raw_next = str(get_step_value(raw, 'next_step') or '').strip()
     if raw_next == '':
         step.next = None

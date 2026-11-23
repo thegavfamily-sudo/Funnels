@@ -920,19 +920,20 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
                                         effects.get_final_text(message_text),
                                         options)
 
+    # Автопереход только при scroll=auto И явно заданном next_step > 0.
+    # Без auto последовательного авто-перехода нет; пустой next_step при
+    # auto тоже не даёт перехода (без фолбэка current+1).
     if user_id and step.auto:
         if step.delay > 0:
             time.sleep(step.delay)
 
-        # Пустая колонка next_step → последовательный переход; непустая
-        # (в т.ч. '0' = перехода нет) — как в оригинале, берём её.
-        next_step = step.next if step.next is not None \
-            else StepManager.get_next_step(ctx, step_number)
+        next_step = step.next if step.next is not None and step.next > 0 else 0
 
         if next_step > 0:
             users.set_user_state(ctx, user_id, next_step)
             send_step_message(ctx, chat_id, next_step, user_id)
-        else:
+        elif step.next == 0:
+            # Явный '0' при auto — конец воронки (как в старом формате).
             complete_funnel(ctx, user_id, chat_id)
 
 

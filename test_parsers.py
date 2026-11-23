@@ -60,6 +60,27 @@ class TestParseRegularKeyboardData(unittest.TestCase):
         self.assertEqual(button['command'], 'cmd')
         self.assertEqual(button['role'], 'admin')
 
+    def test_command_step_after_function(self):
+        # У command 4-е поле — шаг после execute_function (если число).
+        result = parse_regular_keyboard_data(
+            'Счёт|command|Coins|7')
+        button = result['buttons'][0][0]
+        self.assertEqual(button['type'], 'command')
+        self.assertEqual(button['command'], 'Coins')
+        self.assertEqual(button['step'], 7)
+        self.assertEqual(button['role'], '')
+
+    def test_command_non_numeric_fourth_is_role(self):
+        result = parse_regular_keyboard_data('Btn|command|Coins|admin')
+        button = result['buttons'][0][0]
+        self.assertEqual(button['step'], 0)
+        self.assertEqual(button['role'], 'admin')
+
+    def test_command_without_step(self):
+        result = parse_regular_keyboard_data('Далее|command|next')
+        button = result['buttons'][0][0]
+        self.assertEqual(button['step'], 0)
+
     def test_empty_returns_none(self):
         self.assertIsNone(parse_regular_keyboard_data(''))
         self.assertIsNone(parse_regular_keyboard_data('   '))
@@ -67,7 +88,7 @@ class TestParseRegularKeyboardData(unittest.TestCase):
 
 
 class TestParseInlineKeyboardData(unittest.TestCase):
-    """parseInlineKeyboardData (:3216): text|type|step|method|action|points|role."""
+    """parseInlineKeyboardData (:3216): text|type|step|method|action."""
 
     def test_defaults_and_steps(self):
         result = parse_inline_keyboard_data('Далее|callback|5||Назад|callback|4')
@@ -100,15 +121,16 @@ class TestParseInlineKeyboardData(unittest.TestCase):
         self.assertEqual(button['step'], 0)
         self.assertEqual(button['method'], 'step by step')
 
-    def test_check_channel_and_points_role(self):
+    def test_check_channel_skips_legacy_points_role(self):
+        # Legacy-хвост points|role у inline больше не читается.
         result = parse_inline_keyboard_data(
             'Подписаться|check channel|7|step by step|keep|10|vip')
         self.assertIsNotNone(result)
         button = result['buttons'][0][0]
         self.assertEqual(button['type'], 'check channel')
         self.assertEqual(button['step'], 7)
-        self.assertEqual(button['points'], 10)
-        self.assertEqual(button['role'], 'vip')
+        self.assertNotIn('points', button)
+        self.assertNotIn('role', button)
 
     def test_empty_returns_none(self):
         self.assertIsNone(parse_inline_keyboard_data(''))
@@ -148,6 +170,29 @@ class TestInlineValuePayload(unittest.TestCase):
         btn = built['inline_keyboard'][0][0]
         self.assertEqual(btn['text'], 'Помощь')
         self.assertTrue(btn['callback_data'].startswith('cmd_help'))
+
+    def test_command_step_after_function(self):
+        # 6-е поле у command — целевой шаг после execute_function.
+        parsed = parse_inline_keyboard_data(
+            'Счёт|command|Coins|step by step|keep|7')
+        button = parsed['buttons'][0][0]
+        self.assertEqual(button['type'], 'command')
+        self.assertEqual(button['value'], 'Coins')
+        self.assertEqual(button['step'], 7)
+        self.assertNotIn('points', button)
+        built = build_inline_keyboard_from_parsed_data(parsed, None)
+        btn = built['inline_keyboard'][0][0]
+        self.assertIn('cmd_Coins', btn['callback_data'])
+        self.assertIn('_step_7', btn['callback_data'])
+
+    def test_command_without_step_has_no_step_suffix(self):
+        parsed = parse_inline_keyboard_data(
+            'Счёт|command|Coins|step by step|keep')
+        button = parsed['buttons'][0][0]
+        self.assertEqual(button['step'], 0)
+        built = build_inline_keyboard_from_parsed_data(parsed, None)
+        btn = built['inline_keyboard'][0][0]
+        self.assertNotIn('_step_', btn['callback_data'])
 
     def test_build_url_falls_back_to_text_legacy(self):
         # Старый формат: payload в самом text
@@ -329,6 +374,22 @@ class TestExtractCallbackParams(unittest.TestCase):
     def test_cmd_prefix(self):
         params = extract_callback_params('cmd_next_row_0_col_0_action_keep')
         self.assertEqual(params['cmd'], 'next')
+
+    def test_cmd_with_target_step(self):
+        params = extract_callback_params(
+            'cmd_Coins_row_0_col_0_action_keep_step_7')
+        self.assertEqual(params['cmd'], 'Coins')
+        self.assertEqual(params['step'], '7')
+        self.assertEqual(params['row'], '0')
+        self.assertEqual(params['action'], 'keep')
+
+    def test_cmd_named_step_still_parses(self):
+        # Имя функции «step» не должно съедать токен целевого шага.
+        params = extract_callback_params(
+            'cmd_step_row_1_col_0_action_keep_step_4')
+        self.assertEqual(params['cmd'], 'step')
+        self.assertEqual(params['step'], '4')
+        self.assertEqual(params['row'], '1')
 
     def test_unknown_prefix_no_function_id(self):
         # Легаси-префиксы (system_/custom_/builtin_) убраны.

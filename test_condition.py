@@ -1,4 +1,4 @@
-# test_condition.py — parse_condition / _cond_compare: проверка тегов.
+# test_condition.py — parse_condition / _cond_compare / execute_condition.
 
 from __future__ import annotations
 
@@ -8,7 +8,22 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from functions import _cond_compare, parse_condition  # noqa: E402
+from functions import _cond_compare, execute_condition, parse_condition  # noqa: E402
+
+
+class _FakeStorage:
+    def __init__(self, data=None):
+        self.row = {'current_step': 1, 'data': dict(data or {})}
+
+    def get_user(self, funnel_id, user_id):
+        return self.row
+
+
+class _FakeCtx:
+    funnel_id = 'f1'
+
+    def __init__(self, data=None):
+        self.storage = _FakeStorage(data)
 
 
 class TestParseCondition(unittest.TestCase):
@@ -82,6 +97,40 @@ class TestCondCompare(unittest.TestCase):
 
     def test_comma_decimal(self):
         self.assertTrue(_cond_compare('10,5', '>', 10.0))
+
+
+class TestExecuteConditionSteps(unittest.TestCase):
+    """execute_condition возвращает шаг ветки (step_yes / step_no)."""
+
+    def test_yes_branch_returns_step_yes(self):
+        ctx = _FakeCtx({'coins': 150})
+        result = execute_condition(
+            ctx, 111, 'coins >= 100', 'VIP', 'Нет',
+            step_yes=7, step_no=9)
+        self.assertTrue(result['success'])
+        self.assertEqual(result['message'], 'VIP')
+        self.assertEqual(result['step'], 7)
+
+    def test_no_branch_returns_step_no(self):
+        ctx = _FakeCtx({'coins': 50})
+        result = execute_condition(
+            ctx, 111, 'coins >= 100', 'VIP', 'Нет',
+            step_yes=7, step_no=9)
+        self.assertEqual(result['message'], 'Нет')
+        self.assertEqual(result['step'], 9)
+
+    def test_empty_message_still_returns_step(self):
+        ctx = _FakeCtx({'coins': 150})
+        result = execute_condition(
+            ctx, 111, 'coins >= 100', '', 'Нет',
+            step_yes=7, step_no=0)
+        self.assertEqual(result['message'], '')
+        self.assertEqual(result['step'], 7)
+
+    def test_zero_steps_by_default(self):
+        ctx = _FakeCtx({'coins': 1})
+        result = execute_condition(ctx, 111, 'coins >= 100', 'A', 'B')
+        self.assertEqual(result['step'], 0)
 
 
 if __name__ == '__main__':

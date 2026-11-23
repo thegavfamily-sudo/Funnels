@@ -236,6 +236,30 @@ def handle_command(ctx: BotContext, chat_id, user_id: Any, command: str) -> None
 # handleMessage (:5882)
 # ---------------------------------------------------------------------------
 
+def _handle_web_app_data(ctx: BotContext, chat_id, user_id: Any,
+                         current_step: int, web_app_data: dict) -> None:
+    """Mini App вызвал sendData() — переход на шаг одноимённой web app-кнопки."""
+    try:
+        button_text = str(web_app_data.get('button_text') or '').strip()
+        keyboard_data = StepManager.get_inline_keyboard_for_step(
+            ctx, current_step)
+        if not keyboard_data or not keyboard_data.get('parsedData'):
+            return
+        for row in keyboard_data['parsedData']['buttons']:
+            for button in row:
+                if button.get('type') != 'web app':
+                    continue
+                if str(button.get('text') or '').strip() != button_text:
+                    continue
+                target = _int_or_0(button.get('step'))
+                if target > 0 and target != current_step:
+                    users.set_user_state(ctx, user_id, target)
+                    steps.send_step_message(ctx, chat_id, target, user_id)
+                return
+    except Exception as error:  # noqa: BLE001
+        logger.error('[handle_web_app_data] %s', error)
+
+
 def handle_message(ctx: BotContext, message: dict) -> None:
     try:
         chat_id = message['chat']['id']
@@ -285,6 +309,13 @@ def handle_message(ctx: BotContext, message: dict) -> None:
             steps.send_step_message(ctx, chat_id, 1, user_id)
             return
 
+        # Web App вызвал sendData() → переход на шаг кнопки, если задан.
+        web_app_data = message.get('web_app_data')
+        if web_app_data:
+            _handle_web_app_data(ctx, chat_id, user_id, current_step,
+                                 web_app_data)
+            return
+
         step = StepManager.get_step_data(ctx, current_step)
 
         if step:
@@ -331,6 +362,13 @@ def handle_message(ctx: BotContext, message: dict) -> None:
                                     ctx, command, user_id, chat_id)
                                 if result.get('message'):
                                     ctx.tg.send_message(chat_id, result['message'])
+                                # Шаг: из ветки condition иначе из поля кнопки.
+                                target = _int_or_0(result.get('step')) \
+                                    or _int_or_0(button.get('step'))
+                                if target > 0 and target != current_step:
+                                    users.set_user_state(ctx, user_id, target)
+                                    steps.send_step_message(
+                                        ctx, chat_id, target, user_id)
                         break
                 if button_found:
                     break
@@ -520,6 +558,18 @@ def handle_callback_query(ctx: BotContext, callback_query: dict) -> None:
                 result = functions.execute_function(ctx, command, user_id, chat_id)
                 if result.get('message'):
                     ctx.tg.send_message(chat_id, result['message'])
+                # Шаг: ветка condition приоритетнее, иначе поле кнопки Command.
+                target_step = _int_or_0(result.get('step')) \
+                    or _int_or_0(params.get('step'))
+                if target_step > 0 and target_step != current_step:
+                    users.set_user_state(ctx, user_id, target_step)
+                    method = _button_method(keyboard_data, row, col)
+                    if method == 'update step' and message_id:
+                        steps.update_step_message(ctx, chat_id, message_id,
+                                                  target_step, user_id)
+                    else:
+                        steps.send_step_message(ctx, chat_id, target_step,
+                                                user_id)
 
             ctx.tg.answer_callback_query(query_id)
             callback_processed = True
