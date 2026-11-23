@@ -849,6 +849,47 @@ def _pin_if_needed(ctx: BotContext, chat_id, message_id: Any,
         ctx.tg.pin_message(chat_id, message_id)
 
 
+def _url_auto_fire(ctx: BotContext, chat_id, step_number: int,
+                   user_id: Any, target: int) -> None:
+    """Таймер url-кнопки: переход, если пользователь всё ещё на шаге."""
+    try:
+        if users.get_user_state(ctx, user_id) != step_number:
+            return
+        users.set_user_state(ctx, user_id, target)
+        send_step_message(ctx, chat_id, target, user_id)
+    except Exception as error:  # noqa: BLE001
+        logger.error('[url_auto_fire] %s', error)
+
+
+def _schedule_url_auto(ctx: BotContext, chat_id, step_number: int,
+                       user_id: Any, step) -> None:
+    """URL-кнопки: эмуляция авто-перехода с задержкой.
+
+    Telegram не сообщает боту о клике по url-кнопке, поэтому переход
+    планируется от показа шага: через delay секунд, если пользователь
+    не ушёл дальше (state не изменился).
+    """
+    if not user_id or not step.inline_keyboard:
+        return
+    parsed = step.inline_keyboard.get('parsedData') or {}
+    for row in parsed.get('buttons') or []:
+        for btn in row:
+            if (btn.get('type') or '') != 'url':
+                continue
+            try:
+                target = int(btn.get('step') or 0)
+                delay = int(btn.get('delay') or 0)
+            except (TypeError, ValueError):
+                continue
+            if target <= 0 or delay <= 0 or target == step_number:
+                continue
+            timer = threading.Timer(
+                delay, _url_auto_fire,
+                args=(ctx, chat_id, step_number, user_id, target))
+            timer.daemon = True
+            timer.start()
+
+
 def send_step_message(ctx: BotContext, chat_id, step_number: int,
                       user_id: Any = None) -> None:
     """Порт MessageHandler.sendStepMessage (:5503) — диспетчер типов шагов."""
@@ -920,6 +961,9 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
                                         effects.get_final_text(message_text),
                                         options)
 
+    # url-кнопки: авто-переход через задержку от показа шага.
+    _schedule_url_auto(ctx, chat_id, step_number, user_id, step)
+
     # Автопереход только при scroll=auto И явно заданном next_step > 0.
     # Без auto последовательного авто-перехода нет; пустой next_step при
     # auto тоже не даёт перехода (без фолбэка current+1).
@@ -971,6 +1015,7 @@ def update_step_message(ctx: BotContext, chat_id, message_id: int,
 
     if not has_effects:
         ctx.tg.edit_message_text(chat_id, message_id, message_text, options)
+        _schedule_url_auto(ctx, chat_id, step_number, user_id, step)
         return
 
     try:
@@ -988,6 +1033,7 @@ def update_step_message(ctx: BotContext, chat_id, message_id: int,
     except Exception:  # noqa: BLE001
         ctx.tg.edit_message_text(chat_id, message_id,
                                  effects.get_final_text(message_text), options)
+    _schedule_url_auto(ctx, chat_id, step_number, user_id, step)
 
 
 def complete_funnel(ctx: BotContext, user_id: Any, chat_id) -> None:

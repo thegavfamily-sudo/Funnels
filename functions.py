@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+import config
 import users
 from storage import BotContext
 
@@ -357,6 +358,69 @@ def execute_condition(ctx: BotContext, user_id: Any, condition: str,
     except Exception as error:  # noqa: BLE001
         logger.error('[executeCondition] %s', error)
         return {'success': False, 'message': f'❌ Ошибка проверки: {error}'}
+
+
+# ---------------------------------------------------------------------------
+# Purchase — проверка баланса и списание для кнопки типа purchase.
+# Проверка и списание в одном вызове: окна для гонки между ними нет.
+# ---------------------------------------------------------------------------
+
+def _purchase_number(raw: Any) -> float:
+    """Значение тега/цены как число; пусто/мусор → 0."""
+    if raw is None or str(raw).strip() == '':
+        return 0.0
+    try:
+        return float(str(raw).strip().replace(',', '.'))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _purchase_normalize(value: float) -> Any:
+    if abs(value - round(value)) < 1e-9:
+        return int(round(value))
+    return round(value, 6)
+
+
+def execute_purchase(ctx: BotContext, user_id: Any, price: Any,
+                     ok_text: str, fail_text: str) -> dict:
+    """Списать price из тега баланса при достаточном остатке.
+
+    success=True — баланс списан (message с подстановкой {price}/{coins});
+    success=False — не хватает средств, баланс не тронут.
+    """
+    try:
+        if not user_id:
+            return {'success': False,
+                    'message': '❌ Покупка доступна только для пользователя'}
+        price_value = _purchase_number(price)
+        if price_value < 0:
+            return {'success': False,
+                    'message': '❌ Некорректная цена кнопки'}
+
+        tag = config.PURCHASE_TAG
+        row = ctx.storage.get_user(ctx.funnel_id, user_id)
+        data: dict = dict(row.get('data') or {}) if row else {}
+        balance = _purchase_number(data.get(tag))
+
+        if balance + 1e-9 < price_value:
+            text = str(fail_text or '').strip() or \
+                '❌ Недостаточно монет: нужно {price}, у вас {coins}'
+            text = text.replace('{price}', str(_purchase_normalize(price_value)))
+            return {'success': False, 'balance': _purchase_normalize(balance),
+                    'message': users.replace_tags_in_text(ctx, text, user_id)}
+
+        data[tag] = _purchase_normalize(balance - price_value)
+        ctx.storage.save_user_row(ctx.funnel_id, user_id,
+                                  users.get_user_state(ctx, user_id), data)
+
+        text = str(ok_text or '').strip() or \
+            '✅ Оплачено! Списано {price}, баланс: {coins}'
+        text = text.replace('{price}', str(_purchase_normalize(price_value)))
+        return {'success': True, 'balance': data[tag],
+                'message': users.replace_tags_in_text(ctx, text, user_id)}
+    except Exception as error:  # noqa: BLE001
+        logger.error('[executePurchase] %s', error)
+        return {'success': False, 'message': f'❌ Ошибка покупки: {error}'}
 
 
 # ---------------------------------------------------------------------------

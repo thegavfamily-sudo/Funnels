@@ -1,21 +1,17 @@
 # ============================================================================
-# step_model.py — модель шага воронки и адаптер старого «табличного» формата.
+# step_model.py — модель шага воронки.
 #
-# Раньше шаг был dict-строкой из Google Таблицы: колонки next_step/scroll/delay
-# строками, опрос — строкой через '|', клавиатура — строкой через '||'. Каждый
-# вызов отправки перепарсивал эти строки (get_step_value + parse_*).
+# Хранение: JSON-объект шага в Supabase (Step json). Клавиатуры, опросы,
+# квизы, кости — только JSON-структуры, разделителей '|' нет.
 #
-# Теперь: при загрузке воронки build_step() ОДИН РАЗ превращает сырую строку
+# При загрузке воронки build_step() ОДИН РАЗ превращает сырой dict
 # в объект Step с типизированными полями. Весь дальнейший код (steps/handlers)
-# работает только с полями Step и строки больше не парсит.
-#
-# Старый формат поддерживается через адаптер: parse_* переехали сюда и
-# используются только здесь (плюс тесты) — существующие воронки работают
-# без миграции данных.
+# работает только с полями Step.
 # ============================================================================
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -162,7 +158,7 @@ def normalize_type_value(type_value: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Poll / Quiz (parsePollData :2605 / parseQuizData :2659)
+# Poll / Quiz: только объектный формат (JSON внутри шага)
 # ---------------------------------------------------------------------------
 
 def _parse_int_leading(value: str) -> Optional[int]:
@@ -182,140 +178,6 @@ def _parse_int_list(text: str) -> Optional[list[int]]:
     return values
 
 
-def parse_poll_data(poll_str: Any) -> Optional[dict]:
-    try:
-        if not poll_str or str(poll_str).strip() == '':
-            return None
-
-        parts = [p.strip() for p in str(poll_str).split('|')]
-        result = {
-            'question': parts[0] if parts and parts[0] else 'Вопрос',
-            'answers': [],
-            'multiple': False,
-            'anonymous': True,
-            'logicValues': [],
-            'steps': [],
-        }
-
-        if len(parts) > 1 and parts[1]:
-            result['answers'] = [a.strip() for a in parts[1].split(',')
-                                 if a.strip() != '']
-
-        if len(parts) > 2 and parts[2]:
-            result['multiple'] = parts[2].lower() in _TRUE_VALUES
-
-        if len(parts) > 3 and parts[3]:
-            result['anonymous'] = parts[3].lower() in _TRUE_VALUES
-
-        if len(parts) > 4 and parts[4] and parts[4].strip() != '':
-            parsed = _parse_int_list(parts[4])
-            if parsed is not None:
-                result['logicValues'] = parsed
-
-        if len(parts) > 5 and parts[5] and parts[5].strip() != '':
-            parsed = _parse_int_list(parts[5])
-            if parsed is not None:
-                result['steps'] = [v for v in parsed if v > 0]
-
-        return result
-    except Exception as error:  # noqa: BLE001
-        logger.error('[parsePollData] Error: %s', error)
-        return None
-
-
-def parse_quiz_data(quiz_str: Any) -> Optional[dict]:
-    try:
-        if not quiz_str or str(quiz_str).strip() == '':
-            return None
-
-        parts = [p.strip() for p in str(quiz_str).split('|')]
-        result = {
-            'question': parts[0] if parts and parts[0] else 'Вопрос',
-            'answers': [],
-            'correctOption': 0,
-            'explanation': '',
-            'anonymous': True,
-            'logicValues': [],
-            'steps': [],
-        }
-
-        if len(parts) > 1 and parts[1]:
-            result['answers'] = [a.strip() for a in parts[1].split(',')
-                                 if a.strip() != '']
-
-        if len(parts) > 2 and parts[2]:
-            option = _parse_int_leading(parts[2])
-            if option is not None and 0 <= option < len(result['answers']):
-                result['correctOption'] = option
-
-        if len(parts) > 3 and parts[3]:
-            result['explanation'] = parts[3]
-
-        if len(parts) > 4 and parts[4]:
-            result['anonymous'] = parts[4].lower() in _TRUE_VALUES
-
-        if len(parts) > 5 and parts[5] and parts[5].strip() != '':
-            parsed = _parse_int_list(parts[5])
-            if parsed is not None:
-                result['logicValues'] = parsed
-
-        if len(parts) > 6 and parts[6] and parts[6].strip() != '':
-            parsed = _parse_int_list(parts[6])
-            if parsed is not None:
-                result['steps'] = [v for v in parsed if v > 0]
-
-        return result
-    except Exception as error:  # noqa: BLE001
-        logger.error('[parseQuizData] Error: %s', error)
-        return None
-
-
-def _bool_col(step_data: dict, column: str) -> str:
-    """Переключатель формы → 'TRUE'/'FALSE' для эталонной строки колонки."""
-    raw = str(get_step_value(step_data, column) or '').strip().lower()
-    return 'TRUE' if raw in _TRUE_VALUES else 'FALSE'
-
-
-def compose_poll_string(step_data: dict) -> str:
-    """Строка колонки Poll из полей формы (poll_question, poll_answer, …).
-
-    Форма админки пишет раздельные ключи, а эталонный формат бота —
-    `вопрос|варианты|multiple|anonymous|logic|steps`: без этой сборки
-    опрос из формы в бот не попадает.
-    """
-    question = str(get_step_value(step_data, 'poll_question') or '').strip()
-    answers = str(get_step_value(step_data, 'poll_answer') or '').strip()
-    if not question and not answers:
-        return ''
-    return '|'.join([
-        question,
-        answers,
-        _bool_col(step_data, 'poll_multiple'),
-        _bool_col(step_data, 'poll_anonymous'),
-        str(get_step_value(step_data, 'poll_logic_value') or '').strip(),
-        str(get_step_value(step_data, 'poll_step') or '').strip(),
-    ])
-
-
-def compose_quiz_string(step_data: dict) -> str:
-    """Строка колонки Quiz из полей формы:
-    вопрос|варианты|правильный №|пояснение|аноним|logic|steps."""
-    question = str(get_step_value(step_data, 'quiz_question') or '').strip()
-    answers = str(get_step_value(step_data, 'quiz_answer') or '').strip()
-    if not question and not answers:
-        return ''
-    correct = str(get_step_value(step_data, 'quiz_option') or '').strip() or '0'
-    return '|'.join([
-        question,
-        answers,
-        correct,
-        str(get_step_value(step_data, 'quiz_explanation') or '').strip(),
-        _bool_col(step_data, 'quiz_anonymous'),
-        str(get_step_value(step_data, 'quiz_logic_value') or '').strip(),
-        str(get_step_value(step_data, 'quiz_step') or '').strip(),
-    ])
-
-
 def parse_close_date(value: Any) -> Optional[int]:
     """close_date из формы: unix-timestamp или 'ГГГГ-ММ-ДД ЧЧ:ММ[:SS]' (UTC)."""
     v = str(value or '').strip()
@@ -331,21 +193,6 @@ def parse_close_date(value: Any) -> Optional[int]:
             continue
     logger.warning('[parseCloseDate] Не распознан формат даты: %s', v)
     return None
-
-
-def timing_options(step_data: dict, prefix: str) -> dict:
-    """Автозакрытие опроса/квиза: Telegram принимает open_period (5–86400 с)
-    или close_date. Приоритет у close_date — при обоих период не шлём."""
-    close_date = parse_close_date(
-        get_step_value(step_data, f'{prefix}_close_date'))
-    if close_date is not None:
-        return {'close_date': close_date}
-    raw = str(get_step_value(step_data, f'{prefix}_open_period') or '').strip()
-    if raw.isdigit():
-        period = int(raw)
-        if 5 <= period <= 86400:
-            return {'open_period': period}
-    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -621,82 +468,45 @@ def _timing_close(value: Any) -> Optional[int]:
 
 
 def _build_poll(data: dict) -> Optional[PollConfig]:
-    # Новый формат: poll — объект; старый: строка через '|' или поля poll_*.
+    # Опрос — только объект (JSON); плоские поля/строки не поддерживаются.
     poll_raw = get_step_value(data, 'poll')
-    if isinstance(poll_raw, dict):
-        return PollConfig(
-            question=str(poll_raw.get('question') or 'Вопрос'),
-            answers=[str(a) for a in (poll_raw.get('answers') or [])],
-            multiple=_as_bool(poll_raw.get('multiple')),
-            anonymous=_as_bool(poll_raw.get('anonymous'), True),
-            logic_values=_int_list(poll_raw.get('logic_values')),
-            # steps выровнен с answers: 0 = ветки нет (как '' в старом CSV).
-            steps=_int_list(poll_raw.get('steps')),
-            no_transition=_as_bool(poll_raw.get('no_transition')),
-            open_period=_timing_period(poll_raw.get('open_period')),
-            close_date=_timing_close(poll_raw.get('close_date')),
-        )
-    poll_str = str(poll_raw or '')
-    if not poll_str.strip():
-        # Форма пишет раздельные поля — собираем эталонную строку колонки.
-        poll_str = compose_poll_string(data)
-    parsed = parse_poll_data(poll_str)
-    if not parsed:
+    if not isinstance(poll_raw, dict) or not poll_raw:
         return None
-    timing = timing_options(data, 'poll')
     return PollConfig(
-        question=parsed['question'],
-        answers=parsed['answers'],
-        multiple=parsed['multiple'],
-        anonymous=parsed['anonymous'],
-        logic_values=parsed['logicValues'],
-        steps=parsed['steps'],
-        no_transition=_as_bool(
-            get_step_value(data, 'poll_no_transition')),
-        open_period=timing.get('open_period'),
-        close_date=timing.get('close_date'),
+        question=str(poll_raw.get('question') or 'Вопрос'),
+        answers=[str(a) for a in (poll_raw.get('answers') or [])],
+        multiple=_as_bool(poll_raw.get('multiple')),
+        anonymous=_as_bool(poll_raw.get('anonymous'), True),
+        logic_values=_int_list(poll_raw.get('logic_values')),
+        # steps выровнен с answers: 0 = ветки нет.
+        steps=_int_list(poll_raw.get('steps')),
+        no_transition=_as_bool(poll_raw.get('no_transition')),
+        open_period=_timing_period(poll_raw.get('open_period')),
+        close_date=_timing_close(poll_raw.get('close_date')),
     )
 
 
 def _build_quiz(data: dict) -> Optional[QuizConfig]:
+    # Квиз — только объект (JSON); плоские поля/строки не поддерживаются.
     quiz_raw = get_step_value(data, 'quiz')
-    if isinstance(quiz_raw, dict):
-        answers = [str(a) for a in (quiz_raw.get('answers') or [])]
-        correct = _as_int(quiz_raw.get('correct'), 0)
-        if not (0 <= correct < len(answers)):
-            correct = 0
-        return QuizConfig(
-            question=str(quiz_raw.get('question') or 'Вопрос'),
-            answers=answers,
-            correct_option=correct,
-            explanation=str(quiz_raw.get('explanation') or ''),
-            anonymous=_as_bool(quiz_raw.get('anonymous'), True),
-            logic_values=_int_list(quiz_raw.get('logic_values')),
-            # steps выровнен с answers: 0 = ветки нет.
-            steps=_int_list(quiz_raw.get('steps')),
-            no_transition=_as_bool(quiz_raw.get('no_transition')),
-            open_period=_timing_period(quiz_raw.get('open_period')),
-            close_date=_timing_close(quiz_raw.get('close_date')),
-        )
-    quiz_str = str(quiz_raw or '')
-    if not quiz_str.strip():
-        quiz_str = compose_quiz_string(data)
-    parsed = parse_quiz_data(quiz_str)
-    if not parsed:
+    if not isinstance(quiz_raw, dict) or not quiz_raw:
         return None
-    timing = timing_options(data, 'quiz')
+    answers = [str(a) for a in (quiz_raw.get('answers') or [])]
+    correct = _as_int(quiz_raw.get('correct'), 0)
+    if not (0 <= correct < len(answers)):
+        correct = 0
     return QuizConfig(
-        question=parsed['question'],
-        answers=parsed['answers'],
-        correct_option=parsed['correctOption'],
-        explanation=parsed['explanation'],
-        anonymous=parsed['anonymous'],
-        logic_values=parsed['logicValues'],
-        steps=parsed['steps'],
-        no_transition=_as_bool(
-            get_step_value(data, 'quiz_no_transition')),
-        open_period=timing.get('open_period'),
-        close_date=timing.get('close_date'),
+        question=str(quiz_raw.get('question') or 'Вопрос'),
+        answers=answers,
+        correct_option=correct,
+        explanation=str(quiz_raw.get('explanation') or ''),
+        anonymous=_as_bool(quiz_raw.get('anonymous'), True),
+        logic_values=_int_list(quiz_raw.get('logic_values')),
+        # steps выровнен с answers: 0 = ветки нет.
+        steps=_int_list(quiz_raw.get('steps')),
+        no_transition=_as_bool(quiz_raw.get('no_transition')),
+        open_period=_timing_period(quiz_raw.get('open_period')),
+        close_date=_timing_close(quiz_raw.get('close_date')),
     )
 
 
@@ -763,22 +573,44 @@ def _build_barcode(data: dict) -> BarcodeConfig:
 
 def _build_reply_keyboard(data: dict, number: int,
                           funnel_id: str) -> Optional[dict]:
-    keyboard_str = str(get_step_value(data, 'regular_keyboard') or '')
-    if not keyboard_str.strip():
+    # Только JSON: {buttons, settings} (dict или JSON-строка).
+    keyboard_raw = get_step_value(data, 'regular_keyboard')
+    if keyboard_raw is None or keyboard_raw == '':
         return None
-    parsed = keyboards.parse_regular_keyboard_data(keyboard_str)
+    if isinstance(keyboard_raw, str) and not keyboard_raw.strip():
+        return None
+    parsed = keyboards.parse_regular_keyboard_data(keyboard_raw)
     if not parsed or not parsed['buttons']:
         return None
     return {'parsedData': parsed, 'step': number, 'funnelId': funnel_id}
 
 
+def _build_purchase_texts(data: dict) -> dict:
+    """Тексты кнопок purchase: JSON шага `purchase_buttons`.
+
+    Формат: {"0_0": {"ok": "...", "fail": "..."}, "0_1": {...}},
+    ключ — позиция кнопки row_col (свои тексты на каждую кнопку).
+    """
+    raw = str(get_step_value(data, 'purchase_buttons') or '').strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
 def _build_inline_keyboard(data: dict, number: int,
                            funnel_id: str) -> Optional[dict]:
-    inline_str = str(get_step_value(data, 'inline_keyboard') or '')
-    if not inline_str.strip():
+    # Только JSON: [[{…}]] (список или JSON-строка).
+    inline_raw = get_step_value(data, 'inline_keyboard')
+    if inline_raw is None or inline_raw == '':
+        return None
+    if isinstance(inline_raw, str) and not inline_raw.strip():
         return None
     channel = str(get_step_value(data, 'channel') or '')
-    parsed = keyboards.parse_inline_keyboard_data(inline_str)
+    parsed = keyboards.parse_inline_keyboard_data(inline_raw)
     if not parsed or not parsed['buttons']:
         return None
     built = keyboards.build_inline_keyboard_from_parsed_data(parsed, channel)
@@ -789,6 +621,7 @@ def _build_inline_keyboard(data: dict, number: int,
         'channel': channel,
         'subscriptionMessage': str(get_step_value(data, 'subscription') or ''),
         'noSubscriptionMessage': str(get_step_value(data, 'no_subscription') or ''),
+        'purchaseButtons': _build_purchase_texts(data),
         'parsedData': parsed,
     }
 

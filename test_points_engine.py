@@ -169,7 +169,10 @@ class TestSavePollTags(unittest.TestCase):
 
     def test_quiz_correct(self):
         # Формат quiz: вопрос|варианты|правильный|пояснение|…
-        quiz = build_step({'quiz': 'Вопрос|Да,Нет|1|'}, 1, 'f1').quiz
+        quiz = build_step({'quiz': {
+            'question': 'Вопрос', 'answers': ['Да', 'Нет'],
+            'correct': 1,
+        }}, 1, 'f1').quiz
         ctx = _FakeCtx()
         save_poll_tags(ctx, 111, 'quiz', 1, ['0', '1'], quiz)
         data = ctx.storage.row['data']
@@ -178,7 +181,10 @@ class TestSavePollTags(unittest.TestCase):
         self.assertEqual(data['quiz_correct'], 1)
 
     def test_quiz_wrong(self):
-        quiz = build_step({'quiz': 'Вопрос|Да,Нет|1|'}, 1, 'f1').quiz
+        quiz = build_step({'quiz': {
+            'question': 'Вопрос', 'answers': ['Да', 'Нет'],
+            'correct': 1,
+        }}, 1, 'f1').quiz
         ctx = _FakeCtx()
         save_poll_tags(ctx, 111, 'quiz', 0, ['0', '1'], quiz)
         data = ctx.storage.row['data']

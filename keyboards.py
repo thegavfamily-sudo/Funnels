@@ -1,27 +1,25 @@
 # ============================================================================
 # keyboards.py — парсинг/сборка regular и inline клавиатур
 #
+# Формат хранения — только JSON (разделителей '|' нет):
+#   inline:  [[{text,type,value,method,action,step,delay}, …], …]
+#   regular: {buttons: [[{text,type,command,role,step}, …], …],
+#             settings: {resize_keyboard, …}}
+# Значение может прийти структурой (list/dict из jsonb) или JSON-строкой —
+# парсер принимает оба варианта.
+#
 # Порты из apps_script/БОТ_готовый.gs:
-#   parseRegularKeyboardData          :3044
 #   buildRegularKeyboardFromParsedData:3135
-#   parseInlineKeyboardData           :3216
 #   buildInlineKeyboardFromParsedData :3310
 #   Utils.extractCallbackParams       :902
 #   removeButtonFromKeyboard          :4516
 #   processButtonAction               :4547
-#
-# Форматы строк (НЕ менять):
-#   regular: строки через '||', кнопки через ',', поля через '|':
-#            text|type|command[|step]; хвост 'action:...' — настройки;
-#            у command 4-е число-поле — шаг после функции (иначе role).
-#   inline:  строки через '||', кнопки через ',', поля через '|':
-#            text|type|step|method|action; у command 6-е поле — целевой
-#            шаг после функции (legacy points/role не используются).
 # ============================================================================
 
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import re
 from typing import Any, Optional
@@ -34,7 +32,7 @@ logger = logging.getLogger(__name__)
 # CONFIG.INLINE_BUTTON_TYPES (в оригинале списки различаются).
 _INLINE_PARSE_TYPES = (
     'callback', 'url', 'web app', 'switch inline', 'check channel',
-    'command',
+    'command', 'purchase',
 )
 
 
@@ -50,92 +48,65 @@ def _parse_int_js(value: str) -> Optional[int]:
 # Regular (reply) keyboard
 # ---------------------------------------------------------------------------
 
-def parse_regular_keyboard_data(regular_keyboard_str: Any) -> Optional[dict]:
+def _normalize_regular_button(raw: Any) -> Optional[dict]:
+    """Кнопка нового формата → внутренний вид (дефолты как в legacy-парсе)."""
+    if not isinstance(raw, dict):
+        return None
+    text = str(raw.get('text') or '').strip() or 'Кнопка'
+    type_value = str(raw.get('type') or 'text').strip().lower() or 'text'
+    button = {
+        'text': text,
+        'type': type_value if type_value in config.KEYBOARD_TYPES else 'text',
+        'command': str(raw.get('command') or '').strip(),
+        'role': str(raw.get('role') or '').strip().lower(),
+        'step': 0,
+    }
+    step = raw.get('step')
+    if isinstance(step, (int, float)) and not isinstance(step, bool) \
+            and step > 0:
+        button['step'] = int(step)
+    elif str(step or '').strip():
+        parsed = _parse_int_js(step)
+        if parsed is not None and parsed > 0:
+            button['step'] = parsed
+    return button
+
+
+def _regular_from_json(data: dict) -> Optional[dict]:
+    """Новый формат {buttons, settings} → parsedData (та же форма, что legacy)."""
+    settings = data.get('settings')
+    result: dict[str, Any] = {
+        'buttons': [],
+        'settings': dict(settings) if isinstance(settings, dict) else {},
+    }
+    rows = data.get('buttons')
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        row_buttons = [b for b in (_normalize_regular_button(x) for x in row)
+                       if b]
+        if row_buttons:
+            result['buttons'].append(row_buttons)
+    return result if result['buttons'] else None
+
+
+def parse_regular_keyboard_data(regular_keyboard: Any) -> Optional[dict]:
+    """Клавиатура шага: JSON-формат {buttons, settings} (dict или JSON-строка)."""
     try:
-        if not regular_keyboard_str or str(regular_keyboard_str).strip() == '':
+        if isinstance(regular_keyboard, dict):
+            return _regular_from_json(regular_keyboard)
+        raw_str = str(regular_keyboard or '').strip()
+        if not raw_str:
             return None
-
-        parts = [p.strip() for p in str(regular_keyboard_str).split('||')]
-        parts = [p for p in parts if p != '']
-
-        settings_part = ''
-        buttons_parts: list[str] = []
-
-        if parts:
-            last_part = parts[-1]
-            if last_part.startswith('action:'):
-                settings_part = last_part.replace('action:', '', 1).strip()
-                buttons_parts = parts[:-1]
-            else:
-                buttons_parts = parts
-
-        result: dict[str, Any] = {'buttons': [], 'settings': {}}
-
-        if settings_part:
-            for setting in (s.strip().lower() for s in settings_part.split(',')):
-                if setting == 'resize':
-                    result['settings']['resize_keyboard'] = True
-                elif setting == 'one_time':
-                    result['settings']['one_time_keyboard'] = True
-                elif setting == 'selective':
-                    result['settings']['selective'] = True
-                elif setting.startswith('placeholder='):
-                    result['settings']['input_field_placeholder'] = \
-                        setting.replace('placeholder=', '', 1)
-
-        for row in buttons_parts:
-            buttons = [b.strip() for b in row.split(',')]
-            buttons = [b for b in buttons if b != '']
-            row_buttons = []
-
-            for button_str in buttons:
-                button_parts = [p.strip() for p in button_str.split('|')]
-                if len(button_parts) < 1:
-                    continue
-
-                button_data: dict[str, Any] = {
-                    'text': button_parts[0] or 'Кнопка',
-                    'type': 'text',
-                    'command': '',
-                    'role': '',
-                    'step': 0,
-                }
-
-                if len(button_parts) > 1 and button_parts[1]:
-                    type_value = button_parts[1].lower()
-                    if type_value in config.KEYBOARD_TYPES:
-                        button_data['type'] = type_value
-
-                if len(button_parts) > 2 and button_parts[2]:
-                    button_data['command'] = button_parts[2]
-
-                if len(button_parts) > 3 and button_parts[3]:
-                    if button_data['type'] == 'command':
-                        # У command 4-е поле — шаг после функции, если число
-                        # (иначе — role, как в старом формате).
-                        step_value = _parse_int_js(button_parts[3])
-                        if step_value is not None and step_value > 0:
-                            button_data['step'] = step_value
-                        else:
-                            button_data['role'] = button_parts[3].lower()
-                    else:
-                        button_data['role'] = button_parts[3].lower()
-
-                # 5-е поле: role (если 4-е было шагом) + step у command.
-                if button_data['type'] == 'command' \
-                        and len(button_parts) > 4 and button_parts[4]:
-                    step_value = _parse_int_js(button_parts[4])
-                    if step_value is not None and step_value > 0:
-                        button_data['step'] = step_value
-                    else:
-                        button_data['role'] = button_parts[4].lower()
-
-                row_buttons.append(button_data)
-
-            if row_buttons:
-                result['buttons'].append(row_buttons)
-
-        return result if result['buttons'] else None
+        parsed = json.loads(raw_str)
+        if not isinstance(parsed, dict):
+            return None
+        return _regular_from_json(parsed)
+    except (ValueError, TypeError) as error:
+        logger.warning('[parseRegularKeyboardData] не JSON: %s', error)
+        return None
     except Exception as error:  # noqa: BLE001
         logger.error('[parseRegularKeyboardData] Error: %s', error)
         return None
@@ -202,80 +173,73 @@ def build_regular_keyboard_from_parsed_data(parsed_data: Optional[dict],
 # Inline keyboard
 # ---------------------------------------------------------------------------
 
-def parse_inline_keyboard_data(inline_keyboard_str: Any) -> Optional[dict]:
+def _normalize_inline_button(raw: Any) -> Optional[dict]:
+    """Кнопка нового формата → внутренний вид (дефолты как в legacy-парсе)."""
+    if not isinstance(raw, dict):
+        return None
+    text = str(raw.get('text') or '').strip() or 'Кнопка'
+    type_value = str(raw.get('type') or 'callback').strip().lower()
+    button: dict[str, Any] = {
+        'text': text,
+        'type': type_value if type_value in _INLINE_PARSE_TYPES else 'callback',
+        'step': 0,
+        'method': 'step by step',
+        'action': 'keep',
+    }
+    value = raw.get('value')
+    if value is not None and str(value).strip() != '':
+        button['value'] = str(value).strip()
+    step = raw.get('step')
+    if isinstance(step, (int, float)) and not isinstance(step, bool) \
+            and step > 0:
+        button['step'] = int(step)
+    elif str(step or '').strip():
+        parsed = _parse_int_js(step)
+        if parsed is not None and parsed > 0:
+            button['step'] = parsed
+    method = str(raw.get('method') or '').strip().lower()
+    if method in ('update step', 'update'):
+        button['method'] = 'update step'
+    action = str(raw.get('action') or '').strip().lower()
+    if action in ('hide', 'remove', 'delete', 'keep'):
+        button['action'] = action
+    delay = raw.get('delay')
+    if isinstance(delay, (int, float)) and not isinstance(delay, bool) \
+            and delay > 0:
+        button['delay'] = int(delay)
+    return button
+
+
+def _inline_from_json(rows: Any) -> Optional[dict]:
+    """Новый формат [[кнопка,…],…] → parsedData (та же форма, что legacy)."""
+    if not isinstance(rows, list):
+        return None
+    result: dict[str, Any] = {'buttons': []}
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        row_buttons = [b for b in (_normalize_inline_button(x) for x in row)
+                       if b]
+        if row_buttons:
+            result['buttons'].append(row_buttons)
+    return result if result['buttons'] else None
+
+
+def parse_inline_keyboard_data(inline_keyboard: Any) -> Optional[dict]:
+    """Клавиатура шага: JSON-формат [[кнопка,…],…] (list или JSON-строка)."""
     try:
-        if not inline_keyboard_str or str(inline_keyboard_str).strip() == '':
+        if isinstance(inline_keyboard, list):
+            return _inline_from_json(inline_keyboard)
+        raw_str = str(inline_keyboard or '').strip()
+        if not raw_str:
             return None
-
-        rows = [r.strip() for r in str(inline_keyboard_str).split('||')]
-        rows = [r for r in rows if r != '']
-        result: dict[str, Any] = {'buttons': []}
-
-        for row in rows:
-            buttons = [b.strip() for b in row.split(',')]
-            buttons = [b for b in buttons if b != '']
-            row_buttons = []
-
-            for button_str in buttons:
-                parts = [p.strip() for p in button_str.split('|')]
-                if len(parts) < 1:
-                    continue
-
-                button_data: dict[str, Any] = {
-                    'text': parts[0] or 'Кнопка',
-                    'type': 'callback',
-                    'step': 0,
-                    'method': 'step by step',
-                    'action': 'keep',
-                }
-
-                param_index = 1
-                if len(parts) > param_index and parts[param_index]:
-                    type_value = parts[param_index].lower()
-                    if type_value in _INLINE_PARSE_TYPES:
-                        button_data['type'] = type_value
-                        param_index += 1
-
-                # parts[2] — «step»: номер шага (callback/check channel) ИЛИ
-                # payload приложения: URL (url/web app), текст (switch inline),
-                # команда (command). Сохраняем и как строку, и как число.
-                if len(parts) > param_index:
-                    raw_value = parts[param_index]
-                    param_index += 1
-                    if raw_value:
-                        button_data['value'] = raw_value
-                        step_value = _parse_int_js(raw_value)
-                        if step_value is not None and step_value > 0:
-                            button_data['step'] = step_value
-
-                if len(parts) > param_index:
-                    method_value = parts[param_index].lower()
-                    param_index += 1
-                    if method_value in ('update step', 'update'):
-                        button_data['method'] = 'update step'
-                    else:
-                        button_data['method'] = 'step by step'
-
-                if len(parts) > param_index:
-                    action_value = parts[param_index].lower()
-                    param_index += 1
-                    if action_value in ('hide', 'remove', 'delete', 'keep'):
-                        button_data['action'] = action_value
-
-                # 6-е поле: у command/web app — целевой шаг.
-                if len(parts) > param_index:
-                    slot6 = _parse_int_js(parts[param_index])
-                    param_index += 1
-                    if button_data['type'] in ('command', 'web app') \
-                            and slot6 is not None and slot6 > 0:
-                        button_data['step'] = slot6
-
-                row_buttons.append(button_data)
-
-            if row_buttons:
-                result['buttons'].append(row_buttons)
-
-        return result if result['buttons'] else None
+        parsed = json.loads(raw_str)
+        if not isinstance(parsed, list):
+            return None
+        return _inline_from_json(parsed)
+    except (ValueError, TypeError) as error:
+        logger.warning('[parseInlineKeyboardData] не JSON: %s', error)
+        return None
     except Exception as error:  # noqa: BLE001
         logger.error('[parseInlineKeyboardData] Error: %s', error)
         return None
@@ -341,6 +305,13 @@ def build_inline_keyboard_from_parsed_data(parsed_data: Optional[dict],
                                   f'cmd_{cmd_value}_row_{row_index}'
                                   f'_col_{col_index}_action_{action}'
                                   f'{step_after}')}
+                elif button_type == 'purchase':
+                    # Цена и целевой шаг читаются из parsedData по row/col
+                    # (как method/delay) — callback несёт только позицию.
+                    button = {'text': button_text,
+                              'callback_data': (
+                                  f'buy_row_{row_index}'
+                                  f'_col_{col_index}_action_{action}')}
                 else:  # callback / default
                     button = {'text': button_text,
                               'callback_data': (
@@ -411,6 +382,17 @@ def extract_callback_params(callback_data: str) -> dict:
                 params['action'] = parts[i + 1]
             elif i == 0 and part.isdigit():
                 params['step'] = part
+
+    elif callback_data.startswith(config.CALLBACK_PREFIXES['buy']):
+        data_without_prefix = callback_data[len(config.CALLBACK_PREFIXES['buy']):]
+        parts = data_without_prefix.split('_')
+        for i, part in enumerate(parts):
+            if part == 'row' and i + 1 < len(parts):
+                params['row'] = parts[i + 1]
+            elif part == 'col' and i + 1 < len(parts):
+                params['col'] = parts[i + 1]
+            elif part == 'action' and i + 1 < len(parts):
+                params['action'] = parts[i + 1]
 
     elif callback_data.startswith(config.CALLBACK_PREFIXES['cmd']):
         data_without_prefix = callback_data[len(config.CALLBACK_PREFIXES['cmd']):]

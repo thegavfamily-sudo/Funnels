@@ -1,9 +1,8 @@
 # ============================================================================
-# test_poll_form.py — опрос/квиз из полей формы: сборка эталонной строки
-# колонки, валидация 2–10 (лимит Telegram), автозакрытие open_period/
-# close_date.
+# test_poll_form.py — опрос/квиз: объектный формат (JSON) → sendPoll,
+# лимит 2–10 (лимит Telegram), автозакрытие open_period/close_date.
 #
-# Запуск:  python3 test_poll_form.py   (из папки bot/)
+# Запуск:  python3 test_poll_form.py   (из папки bot git/)
 # ============================================================================
 
 from __future__ import annotations
@@ -17,35 +16,33 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from step_model import (build_step,  # noqa: E402
-                        compose_poll_string, compose_quiz_string,
-                        parse_close_date, parse_poll_data, parse_quiz_data,
-                        timing_options)
+from step_model import build_step, parse_close_date  # noqa: E402
 from steps import handle_poll_message, handle_quiz_message  # noqa: E402
 from steps import process_poll_result  # noqa: E402
 
 
 def mk(data: dict):
-    """Сырая строка шага → Step (как при загрузке воронки)."""
+    """Сырой dict шага → Step (как при загрузке воронки)."""
     return build_step(data, 1, 'f1')
 
-FORM_POLL = {
-    'poll_question': 'Любимый цвет?',
-    'poll_answer': 'Красный, Синий',
-    'poll_multiple': 'TRUE',
-    'poll_anonymous': 'FALSE',
-    'poll_logic_value': '0, 1',
-    'poll_step': '5, 6',
+
+POLL = {
+    'question': 'Любимый цвет?',
+    'answers': ['Красный', 'Синий'],
+    'multiple': True,
+    'anonymous': False,
+    'logic_values': [0, 1],
+    'steps': [5, 6],
 }
 
-FORM_QUIZ = {
-    'quiz_question': 'Столица Франции?',
-    'quiz_answer': 'Париж, Берлин, Мадрид',
-    'quiz_option': '0',
-    'quiz_explanation': 'Эйфелева башня в Париже',
-    'quiz_anonymous': 'TRUE',
-    'quiz_logic_value': '1',
-    'quiz_step': '7',
+QUIZ = {
+    'question': 'Столица Франции?',
+    'answers': ['Париж', 'Берлин', 'Мадрид'],
+    'correct': 0,
+    'explanation': 'Эйфелева башня в Париже',
+    'anonymous': True,
+    'logic_values': [1],
+    'steps': [7],
 }
 
 
@@ -79,39 +76,13 @@ def calls(ctx, method):
     return [payload for m, payload in ctx.tg.calls if m == method]
 
 
-class TestComposeFromFormFields(unittest.TestCase):
-    """Форма пишет poll_*/quiz_* — бот собирает эталонную строку колонки."""
-
-    def test_poll_roundtrip(self):
-        parsed = parse_poll_data(compose_poll_string(dict(FORM_POLL)))
-        self.assertIsNotNone(parsed)
-        self.assertEqual(parsed['question'], 'Любимый цвет?')
-        self.assertEqual(parsed['answers'], ['Красный', 'Синий'])
-        self.assertTrue(parsed['multiple'])
-        self.assertFalse(parsed['anonymous'])
-        self.assertEqual(parsed['logicValues'], [0, 1])
-        self.assertEqual(parsed['steps'], [5, 6])
-
-    def test_quiz_roundtrip(self):
-        parsed = parse_quiz_data(compose_quiz_string(dict(FORM_QUIZ)))
-        self.assertIsNotNone(parsed)
-        self.assertEqual(parsed['question'], 'Столица Франции?')
-        self.assertEqual(parsed['answers'], ['Париж', 'Берлин', 'Мадрид'])
-        self.assertEqual(parsed['correctOption'], 0)
-        self.assertEqual(parsed['explanation'], 'Эйфелева башня в Париже')
-        self.assertTrue(parsed['anonymous'])
-
-    def test_empty_form_fields_compose_nothing(self):
-        self.assertEqual(compose_poll_string({}), '')
-        self.assertEqual(compose_quiz_string({}), '')
-
-
 class TestPollHandling(unittest.TestCase):
-    """handle_poll_message: форма → sendPoll, лимит 2–10, автозакрытие."""
+    """handle_poll_message: объект poll → sendPoll, лимит 2–10, автозакрытие."""
 
-    def test_form_fields_reach_send_poll(self):
+    def test_object_reaches_send_poll(self):
         ctx = make_ctx()
-        handle_poll_message(ctx, 1, mk(dict(FORM_POLL)), {}, None)
+        handle_poll_message(ctx, 1, mk({'type': 'poll', 'poll': POLL}),
+                            {}, None)
 
         sent = calls(ctx, 'sendPoll')
         self.assertEqual(len(sent), 1)
@@ -122,52 +93,55 @@ class TestPollHandling(unittest.TestCase):
 
     def test_one_option_is_error(self):
         ctx = make_ctx()
-        step = {'poll_question': 'Вопрос', 'poll_answer': 'Только один'}
+        step = {'type': 'poll', 'poll': {
+            'question': 'Вопрос', 'answers': ['Только один'],
+        }}
         handle_poll_message(ctx, 1, mk(step), {}, None)
         self.assertEqual(calls(ctx, 'sendPoll'), [])
         self.assertEqual(len(calls(ctx, 'sendMessage')), 1)
 
     def test_eleven_options_is_error(self):
         ctx = make_ctx()
-        step = {
-            'poll_question': 'Вопрос',
-            'poll_answer': ', '.join(f'a{i}' for i in range(11)),
-        }
+        step = {'type': 'poll', 'poll': {
+            'question': 'Вопрос',
+            'answers': [f'a{i}' for i in range(11)],
+        }}
         handle_poll_message(ctx, 1, mk(step), {}, None)
         self.assertEqual(calls(ctx, 'sendPoll'), [])
         self.assertEqual(len(calls(ctx, 'sendMessage')), 1)
 
     def test_open_period_passed(self):
         ctx = make_ctx()
-        step = dict(FORM_POLL, poll_open_period='60')
+        step = {'type': 'poll', 'poll': dict(POLL, open_period=60)}
         handle_poll_message(ctx, 1, mk(step), {}, None)
         self.assertEqual(calls(ctx, 'sendPoll')[0]['poll'].get('open_period'),
                          60)
 
     def test_open_period_out_of_range_ignored(self):
         ctx = make_ctx()
-        step = dict(FORM_POLL, poll_open_period='3')
+        step = {'type': 'poll', 'poll': dict(POLL, open_period=3)}
         handle_poll_message(ctx, 1, mk(step), {}, None)
         self.assertNotIn('open_period', calls(ctx, 'sendPoll')[0]['poll'])
 
     def test_close_date_wins_over_open_period(self):
         ctx = make_ctx()
-        step = dict(FORM_POLL, poll_open_period='60',
-                    poll_close_date='2030-01-01 12:00')
+        step = {'type': 'poll', 'poll': dict(
+            POLL, open_period=60, close_date='2030-01-01 12:00')}
         handle_poll_message(ctx, 1, mk(step), {}, None)
         poll = calls(ctx, 'sendPoll')[0]['poll']
         expected = int(datetime(2030, 1, 1, 12, 0,
-                                 tzinfo=timezone.utc).timestamp())
+                                tzinfo=timezone.utc).timestamp())
         self.assertEqual(poll.get('close_date'), expected)
         self.assertNotIn('open_period', poll)
 
 
 class TestQuizHandling(unittest.TestCase):
-    """handle_quiz_message: форма → sendPoll(type=quiz), лимит 2–10."""
+    """handle_quiz_message: объект quiz → sendPoll(type=quiz), лимит 2–10."""
 
-    def test_form_fields_reach_send_poll(self):
+    def test_object_reaches_send_poll(self):
         ctx = make_ctx()
-        handle_quiz_message(ctx, 1, mk(dict(FORM_QUIZ)), {}, None)
+        handle_quiz_message(ctx, 1, mk({'type': 'quiz', 'quiz': QUIZ}),
+                            {}, None)
 
         sent = calls(ctx, 'sendPoll')
         self.assertEqual(len(sent), 1)
@@ -176,18 +150,18 @@ class TestQuizHandling(unittest.TestCase):
 
     def test_eleven_options_is_error(self):
         ctx = make_ctx()
-        step = {
-            'quiz_question': 'Вопрос',
-            'quiz_answer': ', '.join(f'a{i}' for i in range(11)),
-            'quiz_option': '0',
-        }
+        step = {'type': 'quiz', 'quiz': {
+            'question': 'Вопрос',
+            'answers': [f'a{i}' for i in range(11)],
+            'correct': 0,
+        }}
         handle_quiz_message(ctx, 1, mk(step), {}, None)
         self.assertEqual(calls(ctx, 'sendPoll'), [])
         self.assertEqual(len(calls(ctx, 'sendMessage')), 1)
 
     def test_quiz_timing(self):
         ctx = make_ctx()
-        step = dict(FORM_QUIZ, quiz_open_period='3600')
+        step = {'type': 'quiz', 'quiz': dict(QUIZ, open_period=3600)}
         handle_quiz_message(ctx, 1, mk(step), {}, None)
         self.assertEqual(calls(ctx, 'sendPoll')[0]['poll'].get('open_period'),
                          3600)
@@ -199,15 +173,12 @@ class TestCloseDateParsing(unittest.TestCase):
 
     def test_datetime_utc(self):
         expected = int(datetime(2030, 1, 1, 12, 0,
-                                 tzinfo=timezone.utc).timestamp())
+                                tzinfo=timezone.utc).timestamp())
         self.assertEqual(parse_close_date('2030-01-01 12:00'), expected)
 
     def test_invalid_returns_none(self):
         self.assertIsNone(parse_close_date(''))
         self.assertIsNone(parse_close_date('вчера'))
-
-    def test_timing_options_empty(self):
-        self.assertEqual(timing_options({}, 'poll'), {})
 
 
 class TestTransitionModes(unittest.TestCase):
@@ -276,13 +247,6 @@ class TestTransitionModes(unittest.TestCase):
             'question': 'Q', 'answers': ['a', 'b'], 'correct': 0,
         }}, 1, 'f1')
         self.assertFalse(quiz.quiz.no_transition)
-
-    def test_no_transition_read_from_flat_form_fields(self):
-        # Фолбэк без объекта (плоские колонки формы / старые строки).
-        step = build_step(dict(FORM_POLL, poll_no_transition='TRUE'), 1, 'f1')
-        self.assertTrue(step.poll.no_transition)
-        step = build_step(dict(FORM_QUIZ, quiz_no_transition='TRUE'), 1, 'f1')
-        self.assertTrue(step.quiz.no_transition)
 
     def test_steps_mapping_goes_to_mapped_step(self):
         row = self._row(steps=[2, 2])

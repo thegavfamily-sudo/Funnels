@@ -7,7 +7,7 @@
 #   Utils.extractPureText:729   EffectsHandler     :6330
 #
 # Типы: countdown / progress / spinner / blink / reveal.
-# Кадры внутри тега разделены '|'; задержки — time.sleep (как Utilities.sleep).
+# Кадры внутри тега разделены переводом строки; задержки — time.sleep (как Utilities.sleep).
 #
 # В СООБЩЕНИИ МОЖЕТ БЫТЬ НЕСКОЛЬКО тегов — они проигрываются ПОСЛЕДОВАТЕЛЬНО
 # (фраза за фразой): старт = все эффекты в своих первых кадрах, затем
@@ -142,7 +142,8 @@ def _play_plan(effect: dict) -> tuple[str, list[tuple[float, str]]]:
     etype = effect['type']
     inner = effect['inner_content']
     params = effect['params']
-    parts = inner.split('|')
+    # Кадры через перевод строки.
+    parts = inner.split('\n')
 
     if etype == 'countdown':
         delay = _delay_ms(params, 800)

@@ -1,38 +1,27 @@
 # ============================================================================
-# subscription.py — проверка подписки на канал + кэш с TTL 5 минут
+# subscription.py — проверка подписки на канал (без кэша статуса)
 #
 # Порт SubscriptionManager из apps_script/БОТ_готовый.gs (:1619):
 #   getChat (для @username) → getChatMember → статусы creator/administrator/member
-#   кэш `sub_{userId}_{channel}`, TTL = SHORT_CACHE_TTL_SECONDS (5 мин)
+#
+# Статус подписки НЕ кэшируется: кэширование False «запирало» пользователя
+# на TTL после подписки (повторная проверка отдавала устаревший отказ).
+# Кэшируется только chat_id из getChat — он не меняется.
 # ============================================================================
 
 from __future__ import annotations
 
 import logging
 import threading
-import time
-from typing import Any, Optional
-
-import config
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_subscription_cache: dict[str, dict] = {}
-_cache_lock = threading.Lock()
+# @username → chat_id (бессрочно: идентификатор канала не меняется)
+_chat_id_cache: dict[str, Any] = {}
+_chat_id_lock = threading.Lock()
 
 _SUBSCRIBED_STATUSES = {'creator', 'administrator', 'member'}
-
-
-def _cache_key(user_id: Any, channel: str) -> str:
-    return f'sub_{user_id}_{channel}'
-
-
-def _cleanup(now: float) -> None:
-    ttl = config.SHORT_CACHE_TTL_SECONDS * 1000
-    expired = [k for k, v in _subscription_cache.items()
-               if now - v.get('timestamp', 0) > ttl]
-    for key in expired:
-        del _subscription_cache[key]
 
 
 def check_subscription(tg, user_id: Any, channel_identifier: Any) -> bool:
@@ -42,49 +31,34 @@ def check_subscription(tg, user_id: Any, channel_identifier: Any) -> bool:
             return False
 
         channel = str(channel_identifier).strip()
-        cache_key = _cache_key(user_id, channel)
-        now = time.time() * 1000
-
-        with _cache_lock:
-            _cleanup(now)
-            cached = _subscription_cache.get(cache_key)
-            if cached and now - cached['timestamp'] < config.SHORT_CACHE_TTL_SECONDS * 1000:
-                return cached['isSubscribed']
 
         chat_id: Any = channel
         if channel.startswith('@'):
-            try:
-                chat = tg.get_chat(channel)
-                if chat:
-                    chat_id = chat.get('id', channel)
-            except Exception:  # noqa: BLE001
-                pass
+            with _chat_id_lock:
+                cached_id = _chat_id_cache.get(channel)
+            if cached_id is not None:
+                chat_id = cached_id
+            else:
+                try:
+                    chat = tg.get_chat(channel)
+                    if chat:
+                        chat_id = chat.get('id', channel)
+                        with _chat_id_lock:
+                            _chat_id_cache[channel] = chat_id
+                except Exception:  # noqa: BLE001
+                    pass
 
         member = tg.get_chat_member(chat_id, user_id)
         if not member:
             return False
 
-        status = member.get('status', '')
-        is_subscribed = status in _SUBSCRIBED_STATUSES
-
-        with _cache_lock:
-            _subscription_cache[cache_key] = {
-                'isSubscribed': is_subscribed,
-                'timestamp': now,
-                'channel': channel,
-                'status': status,
-            }
-        return is_subscribed
+        return member.get('status', '') in _SUBSCRIBED_STATUSES
     except Exception as error:  # noqa: BLE001
         logger.error('[checkSubscription] %s', error)
         return False
 
 
-def clear_user_cache(user_id: Any, channel_identifier: Optional[str] = None) -> None:
-    with _cache_lock:
-        if channel_identifier:
-            _subscription_cache.pop(_cache_key(user_id, channel_identifier), None)
-        else:
-            prefix = f'sub_{user_id}_'
-            for key in [k for k in _subscription_cache if k.startswith(prefix)]:
-                del _subscription_cache[key]
+def clear_cache() -> None:
+    """Сбросить кэш chat_id (например, при смене @username канала)."""
+    with _chat_id_lock:
+        _chat_id_cache.clear()

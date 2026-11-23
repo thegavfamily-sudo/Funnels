@@ -34,23 +34,20 @@ class TestLegacyFormat(unittest.TestCase):
         step = build_step({'next_step': ''}, 1, 'f1')
         self.assertIsNone(step.next)
 
-    def test_poll_string(self):
+    def test_poll_string_rejected(self):
+        # Строки с '|' больше не поддерживаются — только объект.
         step = build_step(
             {'type': 'poll', 'poll': 'Вопрос|Да,Нет|false|true|1,2|3,4'},
             1, 'f1')
-        self.assertIsNotNone(step.poll)
-        self.assertEqual(step.poll.question, 'Вопрос')
-        self.assertEqual(step.poll.answers, ['Да', 'Нет'])
-        self.assertEqual(step.poll.logic_values, [1, 2])
-        self.assertEqual(step.poll.steps, [3, 4])
+        self.assertIsNone(step.poll)
 
-    def test_poll_form_fields(self):
+    def test_poll_flat_fields_rejected(self):
+        # Плоские поля формы больше не собираются — только объект poll.
         step = build_step({
             'poll_question': 'Цвет?', 'poll_answer': 'Красный,Синий',
             'poll_logic_value': '0,1', 'poll_step': '2,3',
         }, 1, 'f1')
-        self.assertEqual(step.poll.answers, ['Красный', 'Синий'])
-        self.assertEqual(step.poll.steps, [2, 3])
+        self.assertIsNone(step.poll)
 
 
 class TestNewFormat(unittest.TestCase):

@@ -94,6 +94,7 @@ SYSTEM_MESSAGE_FINAL = 'Funnel final message'
 
 INLINE_BUTTON_TYPES = {
     'callback', 'url', 'web app', 'switch inline', 'check channel',
+    'purchase',
 }
 
 INLINE_KEYBOARD_METHODS = {'step by step', 'update step'}
@@ -102,7 +103,11 @@ CALLBACK_PREFIXES = {
     'check_sub': 'check_sub_',
     'step': 'step_',
     'cmd': 'cmd_',
+    'buy': 'buy_',
 }
+
+# Тег баланса для кнопок purchase (списание/проверка).
+PURCHASE_TAG = 'coins'
 
 USERS_FIXED_COLUMNS = [
     'Date', 'Funnel name', 'User id', 'Username', 'First name',

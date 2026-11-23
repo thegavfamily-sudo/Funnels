@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any, Optional
 
 import config
@@ -253,8 +254,17 @@ def _handle_web_app_data(ctx: BotContext, chat_id, user_id: Any,
                     continue
                 target = _int_or_0(button.get('step'))
                 if target > 0 and target != current_step:
-                    users.set_user_state(ctx, user_id, target)
-                    steps.send_step_message(ctx, chat_id, target, user_id)
+                    delay = _int_or_0(button.get('delay'))
+                    if delay > 0:
+                        timer = threading.Timer(
+                            delay, _delayed_goto,
+                            args=(ctx, chat_id, None, current_step, target,
+                                  user_id, 'step by step'))
+                        timer.daemon = True
+                        timer.start()
+                    else:
+                        users.set_user_state(ctx, user_id, target)
+                        steps.send_step_message(ctx, chat_id, target, user_id)
                 return
     except Exception as error:  # noqa: BLE001
         logger.error('[handle_web_app_data] %s', error)
@@ -423,6 +433,44 @@ def _button_method(keyboard_data: Optional[dict], row: int, col: int) -> str:
     return 'step by step'
 
 
+def _button_delay(keyboard_data: Optional[dict], row: int, col: int) -> int:
+    """Задержка кнопки (сек) перед переходом; 0 — без задержки."""
+    if keyboard_data and keyboard_data.get('parsedData'):
+        buttons = keyboard_data['parsedData'].get('buttons') or []
+        if row < len(buttons) and col < len(buttons[row]):
+            return _int_or_0(buttons[row][col].get('delay'))
+    return 0
+
+
+def _button_purchase(keyboard_data: Optional[dict], row: int,
+                     col: int) -> tuple[Any, int]:
+    """Цена и целевой шаг кнопки purchase из parsedData; (None, 0) — нет."""
+    if keyboard_data and keyboard_data.get('parsedData'):
+        buttons = keyboard_data['parsedData'].get('buttons') or []
+        if row < len(buttons) and col < len(buttons[row]):
+            button = buttons[row][col]
+            return button.get('value'), _int_or_0(button.get('step'))
+    return None, 0
+
+
+def _delayed_goto(ctx: BotContext, chat_id, message_id: Optional[int],
+                  from_step: int, target: int, user_id: Any,
+                  method: str) -> None:
+    """Переход после задержки кнопки: только если пользователь не ушёл
+    с исходного шага (пока ждали, он мог нажать другую кнопку)."""
+    try:
+        if users.get_user_state(ctx, user_id) != from_step:
+            return
+        users.set_user_state(ctx, user_id, target)
+        if method == 'update step' and message_id:
+            steps.update_step_message(ctx, chat_id, message_id,
+                                      target, user_id)
+        else:
+            steps.send_step_message(ctx, chat_id, target, user_id)
+    except Exception as error:  # noqa: BLE001
+        logger.error('[delayed_goto] %s', error)
+
+
 def handle_callback_query(ctx: BotContext, callback_query: dict) -> None:
     try:
         query_id = callback_query.get('id')
@@ -472,7 +520,6 @@ def handle_callback_query(ctx: BotContext, callback_query: dict) -> None:
             if is_subscribed:
                 ctx.tg.send_message(chat_id, subscription_message,
                                     {'parse_mode': 'HTML'})
-                subscription.clear_user_cache(user_id, channel)
 
                 if check_step_number > 0 and check_step_number != current_step:
                     users.set_user_state(ctx, user_id, check_step_number)
@@ -499,6 +546,55 @@ def handle_callback_query(ctx: BotContext, callback_query: dict) -> None:
                 ctx.tg.answer_callback_query(query_id,
                                              '❌ Вы не подписаны на канал', True)
                 callback_processed = True
+            return
+
+        # -- buy_*: покупка по кнопке (проверка баланса + списание) ---------
+        if data.startswith(config.CALLBACK_PREFIXES['buy']):
+            params = extract_callback_params(data)
+            row = _int_or_0(params.get('row'))
+            col = _int_or_0(params.get('col'))
+            action = params.get('action') or 'keep'
+
+            keyboard_data = StepManager.get_inline_keyboard_for_step(
+                ctx, current_step)
+            price, target_step = _button_purchase(keyboard_data, row, col)
+            if price is None:
+                ctx.tg.answer_callback_query(query_id,
+                                             '❌ Ошибка: цена не найдена', True)
+                return
+
+            purchase_texts = (keyboard_data or {}).get('purchaseButtons') or {}
+            button_texts = purchase_texts.get(f'{row}_{col}') or {}
+            result = functions.execute_purchase(
+                ctx, user_id, price,
+                str(button_texts.get('ok') or ''),
+                str(button_texts.get('fail') or ''))
+
+            message_text = str(result.get('message') or '')
+            if result.get('success'):
+                if message_text:
+                    ctx.tg.send_message(chat_id, message_text)
+                keyboards.process_button_action(ctx.tg, keyboard_data,
+                                                chat_id, message_id,
+                                                action, row, col)
+                if target_step > 0 and target_step != current_step:
+                    method = _button_method(keyboard_data, row, col)
+                    users.set_user_state(ctx, user_id, target_step)
+                    if method == 'update step' and message_id:
+                        steps.update_step_message(ctx, chat_id, message_id,
+                                                  target_step, user_id)
+                    else:
+                        steps.send_step_message(ctx, chat_id, target_step,
+                                                user_id)
+                ctx.tg.answer_callback_query(query_id, '✅ Оплачено!', False)
+            else:
+                if message_text:
+                    ctx.tg.send_message(chat_id, message_text)
+                # Alert обрезает длинный текст — короткая общая формулировка,
+                # детали ушли сообщением выше.
+                ctx.tg.answer_callback_query(query_id, '❌ Покупка не прошла',
+                                             True)
+            callback_processed = True
             return
 
         # -- step_*: переход на шаг ----------------------------------------
@@ -562,14 +658,23 @@ def handle_callback_query(ctx: BotContext, callback_query: dict) -> None:
                 target_step = _int_or_0(result.get('step')) \
                     or _int_or_0(params.get('step'))
                 if target_step > 0 and target_step != current_step:
-                    users.set_user_state(ctx, user_id, target_step)
                     method = _button_method(keyboard_data, row, col)
-                    if method == 'update step' and message_id:
-                        steps.update_step_message(ctx, chat_id, message_id,
-                                                  target_step, user_id)
+                    delay = _button_delay(keyboard_data, row, col)
+                    if delay > 0:
+                        timer = threading.Timer(
+                            delay, _delayed_goto,
+                            args=(ctx, chat_id, message_id, current_step,
+                                  target_step, user_id, method))
+                        timer.daemon = True
+                        timer.start()
                     else:
-                        steps.send_step_message(ctx, chat_id, target_step,
-                                                user_id)
+                        users.set_user_state(ctx, user_id, target_step)
+                        if method == 'update step' and message_id:
+                            steps.update_step_message(ctx, chat_id, message_id,
+                                                      target_step, user_id)
+                        else:
+                            steps.send_step_message(ctx, chat_id, target_step,
+                                                    user_id)
 
             ctx.tg.answer_callback_query(query_id)
             callback_processed = True

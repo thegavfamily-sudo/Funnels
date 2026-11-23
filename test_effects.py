@@ -66,7 +66,7 @@ class TestParse(unittest.TestCase):
         self.assertEqual(parsed[0]['params'], ['300', '3', '❗'])
 
     def test_initial_final_keep_prefix_suffix(self):
-        content = 'Привет <effect:countdown>3|2|1|Пока</effect> хвост'
+        content = 'Привет <effect:countdown>3\n2\n1\nПока</effect> хвост'
         self.assertEqual(effects.get_initial_text(content), 'Привет 3 хвост')
         self.assertEqual(effects.get_final_text(content), 'Привет Пока хвост')
 
@@ -76,7 +76,7 @@ class TestPlayback(unittest.TestCase):
         tg = FakeTG()
         with mock.patch.object(effects.time, 'sleep') as sleep:
             ok = effects.process_effects(
-                tg, 1, 5, '<effect:countdown>3|2|1|🚀</effect>')
+                tg, 1, 5, '<effect:countdown>3\n2\n1\n🚀</effect>')
         self.assertTrue(ok)
         # Старт '3' уже на экране (get_initial_text) — process играет шаги.
         self.assertEqual(tg.edits, ['2', '1', '🚀'])
@@ -107,7 +107,7 @@ class TestPlayback(unittest.TestCase):
         tg = FakeTG()
         with mock.patch.object(effects.time, 'sleep'):
             ok = effects.process_effects(
-                tg, 1, 5, '<effect:reveal>Привет|Мир</effect>')
+                tg, 1, 5, '<effect:reveal>Привет\nМир</effect>')
         self.assertTrue(ok)
         # Старт 'Привет' уже на экране — один шаг накопления.
         self.assertEqual(tg.edits, ['Привет\nМир'])
@@ -116,11 +116,11 @@ class TestPlayback(unittest.TestCase):
 class TestReveal(unittest.TestCase):
     def test_final_is_accumulated(self):
         # Итог = все кадры через \n (как после анимации), а не последний.
-        content = '<effect:reveal>А|Б</effect>'
+        content = '<effect:reveal>А\nБ</effect>'
         self.assertEqual(effects.get_final_text(content), 'А\nБ')
 
     def test_cum_mode_shows_full_frames(self):
-        content = '<effect:reveal:500:cum>Привет|Привет мир</effect>'
+        content = '<effect:reveal:500:cum>Привет\nПривет мир</effect>'
         tg = FakeTG()
         with mock.patch.object(effects.time, 'sleep'):
             ok = effects.process_effects(tg, 1, 1, content)
@@ -135,7 +135,7 @@ class TestReveal(unittest.TestCase):
         opts = {'reply_markup': {'inline_keyboard': [[{'text': 'ok'}]]}}
         with mock.patch.object(effects.time, 'sleep'):
             ok = effects.process_effects(
-                tg, 1, 1, '<effect:countdown>1|2</effect>',
+                tg, 1, 1, '<effect:countdown>1\n2</effect>',
                 edit_options=opts)
         self.assertTrue(ok)
         self.assertTrue(tg.edit_options, 'ожидались правки')
@@ -145,7 +145,7 @@ class TestReveal(unittest.TestCase):
     def test_cum_final_equals_source_text(self):
         # Финал cum-режима совпадает с исходом побуквенно (без \n).
         source = 'Привет  мир'  # двойной пробель сохраняется
-        content = f'<effect:reveal:500:cum>Привет|{source}</effect>'
+        content = f'<effect:reveal:500:cum>Привет\n{source}</effect>'
         self.assertEqual(effects.get_final_text(content), source)
 
     def test_single_phrase_reveal_shown_whole(self):
