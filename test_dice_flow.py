@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config  # noqa: E402
 from step_model import build_step  # noqa: E402
 from steps import (dice_animation_seconds, handle_dice_message,  # noqa: E402
-                   resolve_dice_next_step)
+                   resolve_dice_next_step, send_step_message)
 
 
 def mk(data: dict, number: int = 1):
@@ -125,6 +125,41 @@ class TestAnimationWait(unittest.TestCase):
 
         sleep.assert_called_once_with(dice_animation_seconds('🎰'))
         process.assert_called_once_with(ctx, 5)
+
+
+class TestDiceAutoNoDoublePublish(unittest.TestCase):
+    """scroll=auto у dice (поведение по умолчанию): переход после броска
+    делает сам handle_dice_message → process_dice_result, поэтому авто-блок
+    send_step_message не должен публиковать тот же шаг второй раз."""
+
+    def test_send_step_dice_auto_does_not_publish_next_again(self):
+        class _FakeTG:
+            def __init__(self):
+                self.sent = []
+
+            def send_message(self, chat_id, text, options=None):
+                self.sent.append(text)
+                return len(self.sent)
+
+        steps_by_num = {
+            1: build_step({'type': 'dice', 'dice': '🎲',
+                           'scroll': 'auto', 'next_step': 2}, 1, 'f1'),
+            2: build_step({'type': 'text', 'content': 'next step'}, 2, 'f1'),
+        }
+        storage = types.SimpleNamespace(
+            get_step=lambda funnel_id, number: steps_by_num.get(number),
+        )
+        ctx = types.SimpleNamespace(storage=storage, funnel_id='f1',
+                                    tg=_FakeTG(), config={})
+
+        with mock.patch('steps.handle_dice_message') as handle, \
+                mock.patch('steps.build_reply_keyboard', return_value=None), \
+                mock.patch('steps.users.get_user_tag', return_value=''):
+            send_step_message(ctx, 1, 1, 'u1')
+
+        handle.assert_called_once()
+        # Переход уже сделан внутри handle_dice_message — авто-блок молчит.
+        self.assertEqual(ctx.tg.sent, [])
 
 
 if __name__ == '__main__':

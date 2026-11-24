@@ -151,6 +151,24 @@ class TestParseInlineKeyboardData(unittest.TestCase):
         self.assertNotIn('points', button)
         self.assertNotIn('role', button)
 
+    def test_check_channel_legacy_value_is_step(self):
+        # Старые записи хранили «Шаг после проверки» только в value.
+        result = parse_inline_keyboard_data([
+            [{'text': 'Подписаться', 'type': 'check channel', 'value': '6',
+              'method': 'update step', 'action': 'keep'}],
+        ])
+        button = result['buttons'][0][0]
+        self.assertEqual(button['step'], 6)
+        built = build_inline_keyboard_from_parsed_data(result, '@mychan')
+        btn = built['inline_keyboard'][0][0]
+        self.assertTrue(btn['callback_data'].startswith('check_sub_6_'))
+
+    def test_callback_legacy_value_is_step(self):
+        result = parse_inline_keyboard_data([
+            [{'text': 'Далее', 'type': 'callback', 'value': '5'}],
+        ])
+        self.assertEqual(result['buttons'][0][0]['step'], 5)
+
     def test_json_string_accepted(self):
         result = parse_inline_keyboard_data(
             '[[{"text":"A","type":"callback","step":3}]]')

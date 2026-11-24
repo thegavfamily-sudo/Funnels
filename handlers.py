@@ -518,8 +518,13 @@ def handle_callback_query(ctx: BotContext, callback_query: dict) -> None:
                 ctx.tg, user_id, channel)
 
             if is_subscribed:
-                ctx.tg.send_message(chat_id, subscription_message,
-                                    {'parse_mode': 'HTML'})
+                # Всплывает поп-ап с текстом из формы («Сообщение при
+                # успешной подписке»); сообщений в чат не шлём.
+                # Лимит Telegram на alert — 200 символов.
+                alert_text = subscription_message
+                if len(alert_text) > 200:
+                    alert_text = alert_text[:197] + '…'
+                ctx.tg.answer_callback_query(query_id, alert_text, True)
 
                 if check_step_number > 0 and check_step_number != current_step:
                     users.set_user_state(ctx, user_id, check_step_number)
@@ -535,16 +540,15 @@ def handle_callback_query(ctx: BotContext, callback_query: dict) -> None:
                         ctx.tg, keyboard_data, chat_id, message_id,
                         action, row, col)
 
-                ctx.tg.answer_callback_query(query_id, '✅ Проверка пройдена!',
-                                             False)
                 callback_processed = True
             else:
-                formatted_message = no_subscription_message.replace(
+                # Тот же поп-ап с текстом из формы («Сообщение при
+                # отсутствии подписки»); сообщений в чат не шлём.
+                alert_text = no_subscription_message.replace(
                     '{channel}', channel)
-                ctx.tg.send_message(chat_id, formatted_message,
-                                    {'parse_mode': 'HTML'})
-                ctx.tg.answer_callback_query(query_id,
-                                             '❌ Вы не подписаны на канал', True)
+                if len(alert_text) > 200:
+                    alert_text = alert_text[:197] + '…'
+                ctx.tg.answer_callback_query(query_id, alert_text, True)
                 callback_processed = True
             return
 

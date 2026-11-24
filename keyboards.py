@@ -197,6 +197,13 @@ def _normalize_inline_button(raw: Any) -> Optional[dict]:
         parsed = _parse_int_js(step)
         if parsed is not None and parsed > 0:
             button['step'] = parsed
+    # Старые записи callback/check channel хранили шаг только в value
+    # («Шаг (номер)» / «Шаг после проверки») — берём его как step.
+    if button['step'] == 0 and type_value in ('callback', 'check channel') \
+            and str(value or '').strip():
+        legacy = _parse_int_js(str(value).strip())
+        if legacy is not None and legacy > 0:
+            button['step'] = legacy
     method = str(raw.get('method') or '').strip().lower()
     if method in ('update step', 'update'):
         button['method'] = 'update step'

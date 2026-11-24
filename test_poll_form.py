@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from step_model import build_step, parse_close_date  # noqa: E402
 from steps import handle_poll_message, handle_quiz_message  # noqa: E402
-from steps import process_poll_result  # noqa: E402
+from steps import process_poll_result, send_step_message  # noqa: E402
 
 
 def mk(data: dict):
@@ -291,6 +291,41 @@ class TestTransitionModes(unittest.TestCase):
         complete.assert_called_once()
         send.assert_not_called()
         set_state.assert_not_called()
+
+
+class TestPollQuizAutoNoEarlyTransition(unittest.TestCase):
+    """scroll=auto у poll/quiz: переход делает process_poll_result после
+    ответа (маппинг / next_step / no_transition), поэтому авто-блок
+    send_step_message не публикует следующий шаг до ответа."""
+
+    def _send(self, row: dict):
+        steps_by_num = {
+            1: build_step(dict(row), 1, 'f1'),
+            2: build_step({'type': 'text', 'content': 'next step'}, 2, 'f1'),
+        }
+        storage = types.SimpleNamespace(
+            get_step=lambda funnel_id, number: steps_by_num.get(number),
+            get_user=lambda funnel_id, user_id: {'data': {},
+                                                 'current_step': 1},
+        )
+        ctx = types.SimpleNamespace(storage=storage, funnel_id='f1',
+                                    tg=FakeTG(), config={})
+        with mock.patch('steps.build_reply_keyboard', return_value=None), \
+                mock.patch('steps.users.get_user_tag', return_value=''):
+            send_step_message(ctx, 1, 1, 'u1')
+        return ctx
+
+    def test_poll_auto_does_not_publish_next_before_answer(self):
+        ctx = self._send({'type': 'poll', 'poll': POLL,
+                          'scroll': 'auto', 'next_step': 2})
+        self.assertEqual(calls(ctx, 'sendMessage'), [])
+        self.assertEqual(len(calls(ctx, 'sendPoll')), 1)
+
+    def test_quiz_auto_does_not_publish_next_before_answer(self):
+        ctx = self._send({'type': 'quiz', 'quiz': QUIZ,
+                          'scroll': 'auto', 'next_step': 2})
+        self.assertEqual(calls(ctx, 'sendMessage'), [])
+        self.assertEqual(len(calls(ctx, 'sendPoll')), 1)
 
 
 if __name__ == '__main__':

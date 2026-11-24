@@ -113,12 +113,6 @@ def _cycles(params: list[str], index: int, default: int) -> int:
     return min(max(value, 0), _MAX_CYCLES)
 
 
-def _is_cum(effect: dict) -> bool:
-    """reveal в режиме cum: кадр = полный текст (префиксы), не накопление."""
-    params = effect.get('params') or []
-    return len(params) > 1 and params[1].lower() in ('cum', 'raw')
-
-
 # ---------------------------------------------------------------------------
 # План проигрывания и рендер
 # ---------------------------------------------------------------------------
@@ -190,9 +184,6 @@ def _play_plan(effect: dict) -> tuple[str, list[tuple[float, str]]]:
             if not inner.strip():
                 return '', []
             return '', [(delay, inner)]
-        if _is_cum(effect):
-            # Кадры — готовый полный текст: показываем как есть.
-            return parts[0], [(delay, p) for p in parts[1:]]
         # Накопление строк (формат гугл-скрипта «а|б»).
         steps = []
         combined = parts[0]

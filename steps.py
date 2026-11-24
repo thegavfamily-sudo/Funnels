@@ -967,7 +967,11 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
     # Автопереход только при scroll=auto И явно заданном next_step > 0.
     # Без auto последовательного авто-перехода нет; пустой next_step при
     # auto тоже не даёт перехода (без фолбэка current+1).
-    if user_id and step.auto:
+    # dice/poll/quiz переходят сами после броска/ответа (process_dice_result /
+    # process_poll_result уже отправляют целевой шаг: маппинг, next_step или
+    # конец воронки) — авто-блок здесь срабатывал бы до ответа и дублировал
+    # публикацию шага.
+    if user_id and step.auto and step.type not in ('dice', 'poll', 'quiz'):
         if step.delay > 0:
             time.sleep(step.delay)
 

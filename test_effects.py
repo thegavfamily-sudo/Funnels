@@ -119,16 +119,6 @@ class TestReveal(unittest.TestCase):
         content = '<effect:reveal>А\nБ</effect>'
         self.assertEqual(effects.get_final_text(content), 'А\nБ')
 
-    def test_cum_mode_shows_full_frames(self):
-        content = '<effect:reveal:500:cum>Привет\nПривет мир</effect>'
-        tg = FakeTG()
-        with mock.patch.object(effects.time, 'sleep'):
-            ok = effects.process_effects(tg, 1, 1, content)
-        self.assertTrue(ok)
-        self.assertEqual(tg.edits, ['Привет мир'])
-        self.assertEqual(effects.get_final_text(content), 'Привет мир')
-        self.assertEqual(effects.get_initial_text(content), 'Привет')
-
     def test_edits_carry_reply_markup(self):
         # Без reply_markup в editMessageText Telegram снимает инлайн-клавиатуру.
         tg = FakeTG()
@@ -141,12 +131,6 @@ class TestReveal(unittest.TestCase):
         self.assertTrue(tg.edit_options, 'ожидались правки')
         self.assertTrue(all(o is opts for o in tg.edit_options),
                         'каждая правка должна нести reply_markup')
-
-    def test_cum_final_equals_source_text(self):
-        # Финал cum-режима совпадает с исходом побуквенно (без \n).
-        source = 'Привет  мир'  # двойной пробель сохраняется
-        content = f'<effect:reveal:500:cum>Привет\n{source}</effect>'
-        self.assertEqual(effects.get_final_text(content), source)
 
     def test_single_phrase_reveal_shown_whole(self):
         # Одна фраза без «|» — пауза delay, затем ВСЯ фраза целиком
