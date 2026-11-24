@@ -361,8 +361,13 @@ def get_all_user_tags(ctx: BotContext, user_id: Any) -> dict:
     return tags
 
 
-def replace_tags_in_text(ctx: BotContext, text: Any, user_id: Any) -> str:
-    """Порт Utils.replaceTagsInText (:1022): {Tag} → значение (case-insensitive)."""
+def replace_tags_in_text(ctx: BotContext, text: Any, user_id: Any,
+                         _seen_conditions: Optional[set] = None) -> str:
+    """Порт Utils.replaceTagsInText (:1022): {Tag} → значение (case-insensitive).
+
+    Дополнительно {имя} condition-функции: проверка верна → её текст,
+    иначе пусто. Без рекурсии в себя (через _seen_conditions).
+    """
     if not text or not isinstance(text, str) or not user_id:
         return text
     tags = get_all_user_tags(ctx, user_id)
@@ -373,7 +378,42 @@ def replace_tags_in_text(ctx: BotContext, text: Any, user_id: Any) -> str:
         pattern = r'\{' + re.escape(str(tag_name)) + r'\}'
         result = re.sub(pattern, lambda _m, v=str(tag_value): v,
                         result, flags=re.IGNORECASE)
-    return result
+
+    # Остатки {name} — потенциальные имена условий.
+    seen = set(_seen_conditions or ())
+
+    def _cond_sub(match: 're.Match') -> str:
+        name = match.group(1).strip()
+        if name in seen:
+            # Уже раскрываем это условие — вложенное {то же имя} → пусто.
+            return ''
+        resolved = _resolve_condition_placeholder(ctx, name, user_id, seen)
+        return match.group(0) if resolved is None else resolved
+
+    return re.sub(r'\{([^{}]+)\}', _cond_sub, result, flags=re.IGNORECASE)
+
+
+def _resolve_condition_placeholder(ctx: BotContext, name: str, user_id: Any,
+                                  seen: set) -> Optional[str]:
+    """{имя} condition → текст, если верно; иначе ''. None — не условие."""
+    # Ленивый импорт: functions импортирует users на уровне модуля.
+    from functions import get_function_config, parse_condition, _cond_compare
+    cfg = get_function_config(ctx, name)
+    if not cfg or cfg.get('type') != 'condition':
+        return None
+    parsed = parse_condition(cfg.get('condition') or '')
+    if not parsed:
+        return ''
+    tag, op, rhs = parsed
+    row = ctx.storage.get_user(ctx.funnel_id, user_id)
+    data: dict = dict(row.get('data') or {}) if row else {}
+    if not _cond_compare(data.get(tag), op, rhs):
+        return ''
+    msg = str(cfg.get('message') or '').strip()
+    if not msg:
+        return ''
+    return replace_tags_in_text(ctx, msg, user_id,
+                                seen | {name})
 
 
 def save_dice_tags(ctx: BotContext, user_id: Any, dice_emoji: Any,

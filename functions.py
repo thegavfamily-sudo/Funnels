@@ -71,8 +71,76 @@ def get_function_config(ctx: BotContext, function_name: str) -> Optional[dict]:
             # Условие: шаги ветки (0 — без перехода).
             'step_yes': _int_field(data.get('step_yes')),
             'step_no': _int_field(data.get('step_no')),
+            # От кого запускать calc/condition: command|step|dice|poll|quiz.
+            # Пусто = command (старые строки).
+            'trigger': str(data.get('trigger') or '').strip() or 'command',
+            'trigger_step': _int_field(data.get('trigger_step')),
         }
     return None
+
+
+# ---------------------------------------------------------------------------
+# Триггеры: от кого запускать calc/condition
+# ---------------------------------------------------------------------------
+
+def run_functions_for_step(ctx: BotContext, user_id: Any, step_number: int,
+                           pending_branch: int = 0) -> tuple[list[str], int]:
+    """Функции с trigger=step при показе шага. → (сообщения, ветка)."""
+    msgs: list[str] = []
+    branch = pending_branch or 0
+    for result in _run_matching(ctx, user_id, 'step', step_number):
+        msgs.extend(result.get('messages') or [])
+        st = _int_field(result.get('step'))
+        if st > 0:
+            branch = st
+    return msgs, branch
+
+
+def run_functions_for_trigger(ctx: BotContext, user_id: Any,
+                              kind: str) -> tuple[list[str], int]:
+    """Функции с trigger=dice|poll|quiz → (сообщения, ветка condition)."""
+    msgs: list[str] = []
+    branch = 0
+    for result in _run_matching(ctx, user_id, kind, 0):
+        msgs.extend(result.get('messages') or [])
+        st = _int_field(result.get('step'))
+        if st > 0:
+            branch = st
+    return msgs, branch
+
+
+def _int_field(value: Any) -> int:
+    try:
+        return int(str(value or '').strip() or 0)
+    except ValueError:
+        return 0
+
+
+def _run_matching(ctx: BotContext, user_id: Any, trigger: str,
+                  step_number: int) -> list[dict]:
+    out: list[dict] = []
+    # storage может быть упрощённым (тесты) — без functions_rows просто пусто.
+    rows = getattr(ctx.storage, 'functions_rows', None) or []
+    for entry in rows:
+        data = entry.get('data') or {}
+        name = str(data.get('function_name') or '').strip()
+        if not name:
+            continue
+        row_funnel = entry.get('funnel_id')
+        if row_funnel and row_funnel != ctx.funnel_id:
+            continue
+        fn_trigger = str(data.get('trigger') or '').strip() or 'command'
+        if fn_trigger != trigger:
+            continue
+        if trigger == 'step' and _int_field(data.get('trigger_step')) != step_number:
+            continue
+        result = execute_function(ctx, name, user_id, 0)
+        out.append({
+            'messages': [result['message']]
+            if str(result.get('message') or '').strip() else [],
+            'step': result.get('step') or 0,
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------

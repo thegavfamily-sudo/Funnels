@@ -104,6 +104,7 @@ CALLBACK_PREFIXES = {
     'step': 'step_',
     'cmd': 'cmd_',
     'buy': 'buy_',
+    'adv': 'adv_',
 }
 
 # Тег баланса для кнопок purchase (списание/проверка).

@@ -32,7 +32,8 @@ import effects
 import functions
 import keyboards
 import users
-from step_model import (Step, valid_http_url)
+from step_model import (Step, advent_current_day, split_advent_prize,
+                        valid_http_url)
 from storage import BotContext
 
 logger = logging.getLogger(__name__)
@@ -331,10 +332,18 @@ def process_dice_result(ctx: BotContext, message_id: Any) -> bool:
         # Формула из шага (calc_formula) — авто-расчёт по тегам.
         _run_step_calc(ctx, chat_id, user_id, step)
 
+        # Функции trigger=dice — после тегов; ветка condition перекрывает next.
+        trig_msgs, trig_branch = functions.run_functions_for_trigger(
+            ctx, user_id, 'dice')
+        for msg in trig_msgs:
+            ctx.tg.send_message(chat_id, msg)
+
         # Явный маппинг «исход → шаг»: 0 = без перехода (конец воронки).
         # Маппинга нет или у исхода нет пары — как раньше, следующий шаг.
         resolved = resolve_dice_next_step(step, dice_value)
-        if resolved is not None:
+        if trig_branch > 0:
+            next_step = trig_branch
+        elif resolved is not None:
             next_step = resolved
         else:
             next_step = StepManager.get_next_step(ctx, step.number)
@@ -394,12 +403,20 @@ def process_poll_result(ctx: BotContext, poll_id: str, target: str = 'poll') -> 
         # Формула из шага (calc_formula) — авто-расчёт по тегам.
         _run_step_calc(ctx, poll_result['chatId'], poll_result['userId'], step)
 
+        # Функции trigger=poll/quiz — после тегов; ветка перекрывает next.
+        trig_msgs, trig_branch = functions.run_functions_for_trigger(
+            ctx, poll_result['userId'], target)
+        for msg in trig_msgs:
+            ctx.tg.send_message(poll_result['chatId'], msg)
+
         # Режимы формы как у dice: no_transition («Без перехода» из чипов)
         # — воронка завершается; иначе маппинг «ответ → шаг» как раньше
         # (>0 — переход, 0/нет пары — следующий шаг).
         no_transition = bool(cfg is not None and cfg.no_transition)
         next_step = 0
-        if not no_transition:
+        if trig_branch > 0:
+            next_step = trig_branch
+        elif not no_transition:
             if logic_values and steps_list \
                     and 0 <= selected_option < len(logic_values):
                 # Как в JS: steps[selected] может отсутствовать → undefined → 0.
@@ -824,6 +841,114 @@ def handle_dice_message(ctx: BotContext, chat_id, step: Step, options: dict,
 # sendStepMessage / updateStepMessage / completeFunnel
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Адвент-календарь: клавиатура и текст шага (строятся при отправке —
+# в самом шаге не хранятся) + открытие двери по callback adv_<N>.
+# ---------------------------------------------------------------------------
+
+ADVENT_BUTTONS_PER_ROW = 8
+
+
+def _advent_opened_set(ctx: BotContext, days: int, user_id: Any) -> set[int]:
+    """Номера уже открытых дверей: тег advent_opened_<N> == '1'."""
+    if not user_id:
+        return set()
+    tags = users.get_all_user_tags(ctx, user_id)
+    return {number for number in range(1, days + 1)
+            if str(tags.get(f'advent_opened_{number}') or '') == '1'}
+
+
+def build_advent_keyboard(ctx: BotContext, step: Step,
+                          user_id: Any) -> dict:
+    """Клавиатура адвента: ряды по 8 дверей, callback = adv_<N>.
+
+    Эмодзи двери: ✅ — открыта; 🎁 — не открыта, но день наступил (1..day_index);
+    🔒 — будущая.
+    """
+    adv = step.advent
+    if not adv:
+        return {'inline_keyboard': []}
+    day_index = advent_current_day(adv.start, adv.days, adv.tz)
+    opened = _advent_opened_set(ctx, adv.days, user_id)
+
+    rows: list[list[dict]] = []
+    row: list[dict] = []
+    for number in range(1, adv.days + 1):
+        if number in opened:
+            icon = '✅'
+        elif 1 <= number <= day_index:
+            icon = '🎁'
+        else:
+            icon = '🔒'
+        row.append({'text': f'{icon} {number}',
+                    'callback_data': f'adv_{number}'})
+        if len(row) == ADVENT_BUTTONS_PER_ROW:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return {'inline_keyboard': rows}
+
+
+def advent_text(ctx: BotContext, step: Step, text: Any,
+                user_id: Any) -> str:
+    """Текст шага адвента: {advent_day}/{advent_opened}/{advent_total} + теги юзера."""
+    raw = str(text or '')
+    adv = step.advent
+    if adv:
+        # Подставляем до replace_tags_in_text, чтобы плейсхолдеры не
+        # уходили в condition-резолвер.
+        day_index = advent_current_day(adv.start, adv.days, adv.tz)
+        opened = len(_advent_opened_set(ctx, adv.days, user_id))
+        raw = (raw.replace('{advent_day}', str(day_index))
+                  .replace('{advent_opened}', str(opened))
+                  .replace('{advent_total}', str(adv.days)))
+    result = users.replace_tags_in_text(ctx, raw, user_id)
+    return result if isinstance(result, str) else str(result or '')
+
+
+def open_advent_door(ctx: BotContext, step: Step, user_id: Any,
+                     day: int) -> dict:
+    """Открытие двери адвента: тег открытой двери + приз-монеты дня.
+
+    Возвращает {'popup': str, 'opened': bool}: popup — текст всплывающего
+    ответа (обрезка до 200 символов — у вызывающего); opened=True — дверь
+    открыта этим вызовом (клавиатуру нужно перерисовать).
+    """
+    adv = step.advent
+    if not adv or day < 1:
+        return {'popup': '', 'opened': False}
+
+    day_index = advent_current_day(adv.start, adv.days, adv.tz)
+    row = ctx.storage.get_user(ctx.funnel_id, user_id)
+    data: dict = dict(row.get('data') or {}) if row else {}
+    tag = f'advent_opened_{day}'
+
+    if str(data.get(tag) or '') == '1':
+        return {'popup': adv.done, 'opened': False}
+    if day > day_index:
+        return {'popup': adv.early.replace('{day}', str(day)),
+                'opened': False}
+
+    # Открываем дверь: тег навсегда + приз дня (индекс day-1 в advent_prizes).
+    data[tag] = '1'
+    popup = f'🎁 Дверь {day} открыта!'
+    if day <= len(adv.prizes):
+        title, amount = split_advent_prize(adv.prizes[day - 1])
+        if title:
+            popup = title
+        if amount is not None:
+            # Начисление в тег баланса — как в execute_purchase.
+            balance = functions._purchase_number(
+                data.get(config.PURCHASE_TAG))
+            data[config.PURCHASE_TAG] = functions._purchase_normalize(
+                balance + amount)
+
+    ctx.storage.save_user_row(ctx.funnel_id, user_id,
+                              users.get_user_state(ctx, user_id), data)
+    return {'popup': popup, 'opened': True}
+
+
 _TYPING_ACTION_MAP = {
     'photo': 'upload_photo',
     'video': 'upload_video',
@@ -908,10 +1033,19 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
     elif step.inline_keyboard and step.inline_keyboard.get('inlineKeyboard'):
         options['reply_markup'] = step.inline_keyboard['inlineKeyboard']
 
+    # Адвент: клавиатура строится при отправке и перекрывает клавиатуру шага.
+    if step.type == 'advent':
+        options['reply_markup'] = build_advent_keyboard(ctx, step, user_id)
+
     has_effects = effects.has_effects(step.text)
 
     processed_text = step.text
-    if user_id:
+    if step.type == 'advent':
+        processed_text = advent_text(ctx, step, step.text, user_id)
+        # Без текста сообщение не отправится — двери календаря потерялись.
+        if not str(processed_text or '').strip():
+            processed_text = '🎁 Адвент-календарь'
+    elif user_id:
         processed_text = users.replace_tags_in_text(ctx, step.text, user_id)
 
     if ctx.config.get('typing', False):
@@ -964,6 +1098,23 @@ def send_step_message(ctx: BotContext, chat_id, step_number: int,
     # url-кнопки: авто-переход через задержку от показа шага.
     _schedule_url_auto(ctx, chat_id, step_number, user_id, step)
 
+    # Функции с trigger=step — после показа шага, до авто-перехода.
+    # Без user_id (превью/авто) нет тегов юзера — пропускаем.
+    trigger_branch = 0
+    if user_id and step_number > 0:
+        trig_msgs, trigger_branch = functions.run_functions_for_step(
+            ctx, user_id, step_number)
+        for msg in trig_msgs:
+            ctx.tg.send_message(chat_id, msg)
+
+    # Ветка condition с триггером «шаг» перекрывает авто-next.
+    if user_id and trigger_branch > 0 \
+            and step.type not in ('dice', 'poll', 'quiz'):
+        if trigger_branch != step_number:
+            users.set_user_state(ctx, user_id, trigger_branch)
+            send_step_message(ctx, chat_id, trigger_branch, user_id)
+        return
+
     # Автопереход только при scroll=auto И явно заданном next_step > 0.
     # Без auto последовательного авто-перехода нет; пустой next_step при
     # auto тоже не даёт перехода (без фолбэка current+1).
@@ -1002,9 +1153,18 @@ def update_step_message(ctx: BotContext, chat_id, message_id: int,
     elif step.inline_keyboard and step.inline_keyboard.get('inlineKeyboard'):
         options['reply_markup'] = step.inline_keyboard['inlineKeyboard']
 
+    # Адвент: клавиатура строится заново (обновить ✅ на открытых дверях).
+    if step.type == 'advent':
+        options['reply_markup'] = build_advent_keyboard(ctx, step, user_id)
+
     has_effects = effects.has_effects(step.text)
     processed_text = step.text
-    if user_id:
+    if step.type == 'advent':
+        processed_text = advent_text(ctx, step, step.text, user_id)
+        # Без текста сообщение не отправится — двери календаря потерялись.
+        if not str(processed_text or '').strip():
+            processed_text = '🎁 Адвент-календарь'
+    elif user_id:
         processed_text = users.replace_tags_in_text(ctx, step.text, user_id)
 
     if step.type in ('barcode', 'poll', 'quiz', 'dice') \

@@ -15,7 +15,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -140,12 +140,23 @@ _TYPE_MAPPING = {
     'qr-code': 'barcode',
     'text': 'text',
     'input': 'input',
+    'advent': 'advent',
+}
+
+# Кириллические алиасы: re.ASCII-очистка вырезает кириллицу,
+# поэтому проверяем их по исходной строке до чистки.
+_CYRILLIC_TYPE_ALIASES = {
+    'адвент': 'advent',
 }
 
 
 def normalize_type_value(type_value: Any) -> str:
     if not type_value:
         return ''
+    raw = str(type_value).strip().lower()
+    for key, value in _CYRILLIC_TYPE_ALIASES.items():
+        if key in raw:
+            return value
     # re.ASCII: как в JS \w — только [A-Za-z0-9_] (кириллица вырезается)
     clean = re.sub(r'[^\w\s]', '', str(type_value), flags=re.ASCII)
     clean = re.sub(r'\s+', ' ', clean).strip().lower()
@@ -228,6 +239,98 @@ def parse_dice_step_mapping(dice_step_str: Any) -> Optional[list[int]]:
         return _parse_int_list(str(dice_step_str))
     except Exception:  # noqa: BLE001
         return None
+
+
+# ---------------------------------------------------------------------------
+# Адвент-календарь: разбор полей шага (advent_*)
+# ---------------------------------------------------------------------------
+
+ADVENT_DEFAULT_DAYS = 24
+ADVENT_DEFAULT_TZ = 3            # МСК
+ADVENT_EARLY_TEXT = 'Ещё рано! Дверь {day} откроется в свой день.'
+ADVENT_DONE_TEXT = 'Эта дверь уже открыта.'
+
+
+def parse_advent_days(value: Any) -> int:
+    """Количество дверей: строка int, диапазон 1..31, пусто/мусор → 24."""
+    days = _as_int(value, ADVENT_DEFAULT_DAYS)
+    if not 1 <= days <= 31:
+        return ADVENT_DEFAULT_DAYS
+    return days
+
+
+def parse_advent_tz(value: Any) -> int:
+    """Смещение часового пояса от UTC (часы), пусто/мусор → 3 (МСК)."""
+    if value is None or str(value).strip() == '':
+        return ADVENT_DEFAULT_TZ
+    try:
+        return int(str(value).strip())
+    except (ValueError, TypeError):
+        return ADVENT_DEFAULT_TZ
+
+
+def parse_advent_prizes(value: Any) -> list[str]:
+    """advent_prizes: JSON-массив строк; индекс 0 = приз за день 1.
+
+    Формат строки: 'Текст приза' либо 'Текст приза | число'
+    (после '|' — монеты за открытие двери).
+    """
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    text = str(value or '').strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed]
+    return []
+
+
+def split_advent_prize(prize: Any) -> tuple[str, Optional[float]]:
+    """Строка приза: 'Текст | число' → (текст, число); иначе (строка, None).
+
+    Число после '|' — монеты за открытие двери; если после '|' не число,
+    вся строка считается текстом приза.
+    """
+    text = str(prize or '').strip()
+    if '|' not in text:
+        return text, None
+    title, _, tail = text.partition('|')
+    raw = tail.strip().replace(',', '.')
+    try:
+        amount = float(raw)
+    except ValueError:
+        return text, None
+    return title.strip(), amount
+
+
+def advent_current_day(start: str, days: int, tz: int,
+                       now: Optional[datetime] = None) -> int:
+    """Номер текущего дня адвента: сколько дверей уже доступно (кламп 0..days).
+
+    day_index = (дата(now + tz часов) − дата(start)).days + 1;
+    <=0 — старт ещё не наступил (ни одна дверь не открыта);
+    пустой start — все двери доступны сразу (days).
+    """
+    if not start or not str(start).strip():
+        return days
+    try:
+        start_date = datetime.strptime(str(start).strip()[:10],
+                                       '%Y-%m-%d').date()
+    except ValueError:
+        # Не распознанная дата — как пустая: все двери доступны.
+        return days
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_date = (current + timedelta(hours=tz)).date()
+    day_index = (local_date - start_date).days + 1
+    if day_index <= 0:
+        return 0
+    return min(day_index, days)
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +470,17 @@ class BarcodeConfig:
 
 
 @dataclass
+class AdventConfig:
+    """Адвент-календарь: расписание дверей, призы, часовой пояс, тексты."""
+    start: str = ''                 # 'YYYY-MM-DD'; пусто — все двери сразу
+    days: int = ADVENT_DEFAULT_DAYS     # количество дверей (1..31)
+    tz: int = ADVENT_DEFAULT_TZ         # смещение от UTC в часах (3 = МСК)
+    prizes: list[str] = field(default_factory=list)  # индекс 0 = день 1
+    early: str = ADVENT_EARLY_TEXT     # тап на будущую дверь ({day})
+    done: str = ADVENT_DONE_TEXT       # повторное открытие двери
+
+
+@dataclass
 class Step:
     """Шаг воронки в нормальном виде: типизированные поля вместо колонок.
 
@@ -391,6 +505,7 @@ class Step:
     quiz: Optional[QuizConfig] = None
     dice: DiceConfig = field(default_factory=DiceConfig)
     barcode: Optional[BarcodeConfig] = None
+    advent: Optional[AdventConfig] = None
     file_urls: list[str] = field(default_factory=list)
     file_ids: list[str] = field(default_factory=list)
     reply_keyboard: Optional[dict] = None    # {'parsedData', 'step', 'funnelId'}
@@ -571,6 +686,20 @@ def _build_barcode(data: dict) -> BarcodeConfig:
                          options=options, qr_config=qr_config)
 
 
+def _build_advent(data: dict) -> AdventConfig:
+    # Строковые поля шага advent_* → типизированный конфиг при загрузке.
+    early = str(get_step_value(data, 'advent_early') or '').strip()
+    done = str(get_step_value(data, 'advent_done') or '').strip()
+    return AdventConfig(
+        start=str(get_step_value(data, 'advent_start') or '').strip(),
+        days=parse_advent_days(get_step_value(data, 'advent_days')),
+        tz=parse_advent_tz(get_step_value(data, 'advent_tz')),
+        prizes=parse_advent_prizes(get_step_value(data, 'advent_prizes')),
+        early=early or ADVENT_EARLY_TEXT,
+        done=done or ADVENT_DONE_TEXT,
+    )
+
+
 def _build_reply_keyboard(data: dict, number: int,
                           funnel_id: str) -> Optional[dict]:
     # Только JSON: {buttons, settings} (dict или JSON-строка).
@@ -679,6 +808,8 @@ def build_step(data: Optional[dict], number: int, funnel_id: str) -> Step:
     step.quiz = _build_quiz(raw)
     if step.type == 'barcode':
         step.barcode = _build_barcode(raw)
+    if step.type == 'advent':
+        step.advent = _build_advent(raw)
     step.file_urls, step.file_ids = _build_file_lists(raw)
 
     return step

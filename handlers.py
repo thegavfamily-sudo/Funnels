@@ -575,9 +575,14 @@ def handle_callback_query(ctx: BotContext, callback_query: dict) -> None:
                 str(button_texts.get('fail') or ''))
 
             message_text = str(result.get('message') or '')
+            # Поп-ап как у check_sub_*: текст из формы покупки, в чат не шлём.
+            # Лимит Telegram на alert — 200 символов.
+            alert_text = message_text
+            if len(alert_text) > 200:
+                alert_text = alert_text[:197] + '…'
             if result.get('success'):
-                if message_text:
-                    ctx.tg.send_message(chat_id, message_text)
+                ctx.tg.answer_callback_query(
+                    query_id, alert_text or '✅ Оплачено!', True)
                 keyboards.process_button_action(ctx.tg, keyboard_data,
                                                 chat_id, message_id,
                                                 action, row, col)
@@ -590,14 +595,37 @@ def handle_callback_query(ctx: BotContext, callback_query: dict) -> None:
                     else:
                         steps.send_step_message(ctx, chat_id, target_step,
                                                 user_id)
-                ctx.tg.answer_callback_query(query_id, '✅ Оплачено!', False)
             else:
-                if message_text:
-                    ctx.tg.send_message(chat_id, message_text)
-                # Alert обрезает длинный текст — короткая общая формулировка,
-                # детали ушли сообщением выше.
-                ctx.tg.answer_callback_query(query_id, '❌ Покупка не прошла',
-                                             True)
+                ctx.tg.answer_callback_query(
+                    query_id, alert_text or '❌ Покупка не прошла', True)
+            callback_processed = True
+            return
+
+        # -- adv_*: открытие двери адвент-календаря ------------------------
+        if data.startswith(config.CALLBACK_PREFIXES['adv']):
+            day = _int_or_0(extract_callback_params(data).get('day'))
+            step = StepManager.get_step_data(ctx, current_step)
+            if not step or step.type != 'advent':
+                ctx.tg.answer_callback_query(query_id)
+                return
+
+            result = steps.open_advent_door(ctx, step, user_id, day)
+            popup = str(result.get('popup') or '')
+            if not popup:
+                # Неверный номер двери — подтверждаем callback без текста.
+                ctx.tg.answer_callback_query(query_id)
+                callback_processed = True
+                return
+
+            # Поп-ап как у check_sub_*: в чат не шлём.
+            # Лимит Telegram на alert — 200 символов.
+            if len(popup) > 200:
+                popup = popup[:197] + '…'
+            ctx.tg.answer_callback_query(query_id, popup, True)
+
+            if result.get('opened') and message_id:
+                steps.update_step_message(ctx, chat_id, message_id,
+                                          current_step, user_id)
             callback_processed = True
             return
 

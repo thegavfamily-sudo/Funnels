@@ -401,6 +401,12 @@ def extract_callback_params(callback_data: str) -> dict:
             elif part == 'action' and i + 1 < len(parts):
                 params['action'] = parts[i + 1]
 
+    elif callback_data.startswith(config.CALLBACK_PREFIXES['adv']):
+        # adv_<N>: N — номер двери адвента.
+        data_without_prefix = callback_data[len(config.CALLBACK_PREFIXES['adv']):]
+        if data_without_prefix.isdigit():
+            params['day'] = data_without_prefix
+
     elif callback_data.startswith(config.CALLBACK_PREFIXES['cmd']):
         data_without_prefix = callback_data[len(config.CALLBACK_PREFIXES['cmd']):]
         parts = data_without_prefix.split('_')
