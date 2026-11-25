@@ -334,8 +334,34 @@ def advent_current_day(start: str, days: int, tz: int,
 
 
 # ---------------------------------------------------------------------------
-# QR: разбор параметров колонки qr (генерация URL — в steps.py, send-time)
+# QR: разбор параметров колонки qr (генерация картинки — в steps.py, send-time)
 # ---------------------------------------------------------------------------
+
+# Спецификация градиента из пикера: linear-gradient(135deg, #a, #b[, #c…])
+# — от 2 до 6 стопов (многоцветный).
+_QR_GRADIENT_RE = re.compile(
+    r'^linear-gradient\(\s*-?\d+(?:\.\d+)?deg\s*,'
+    r'\s*#[0-9A-Fa-f]{3,6}\s*(?:,\s*#[0-9A-Fa-f]{3,6}\s*)+\)$'
+)
+_QR_RADIAL_GRADIENT_RE = re.compile(
+    r'^radial-gradient\(\s*#[0-9A-Fa-f]{3,6}\s*'
+    r'(?:,\s*#[0-9A-Fa-f]{3,6}\s*)+\)$'
+)
+
+
+def _qr_color_value(value: str) -> str:
+    """Цвет QR-параметра: hex (без '#') или градиент-спецификация.
+
+    Мусор возвращает '' — параметр отбрасывается (как раньше).
+    """
+    v = (value or '').strip()
+    if _QR_GRADIENT_RE.match(v) or _QR_RADIAL_GRADIENT_RE.match(v):
+        return v
+    hex_value = v.replace('#', '')
+    if re.match(r'^[0-9A-Fa-f]{3,6}$', hex_value):
+        return hex_value
+    return ''
+
 
 def parse_qr_config(qr_param_str: str) -> dict:
     try:
@@ -371,22 +397,53 @@ def parse_qr_config(qr_param_str: str) -> dict:
                         params['margin'] = margin
                 except ValueError:
                     pass
+            elif clean_key == 'dotradius':
+                # Радиус скругления модулей кода: доля стороны (0..0.5).
+                try:
+                    dot_radius = float(clean_value)
+                    if 0 <= dot_radius <= 0.5:
+                        params['dotRadius'] = dot_radius
+                except ValueError:
+                    pass
+            elif clean_key == 'eyeradius':
+                # Радиус внешнего контура угловых квадратов — свой,
+                # независимый от модулей (0..0.5 доли стороны).
+                try:
+                    eye_radius = float(clean_value)
+                    if 0 <= eye_radius <= 0.5:
+                        params['eyeRadius'] = eye_radius
+                except ValueError:
+                    pass
+            elif clean_key == 'modulestyle':
+                # Стиль модулей поверх радиуса: капля / ромб.
+                module_style = clean_value.lower()
+                if module_style in ('drop', 'diamond'):
+                    params['moduleStyle'] = module_style
             elif clean_key == 'format':
                 fmt = clean_value.lower()
                 if fmt in ('png', 'jpeg', 'jpg', 'svg'):
                     params['format'] = 'jpeg' if fmt == 'jpg' else fmt
             elif clean_key in ('dark', 'color'):
-                dark_color = clean_value.replace('#', '')
-                if re.match(r'^[0-9A-Fa-f]{3,6}$', dark_color):
-                    params['dark'] = dark_color
+                color = _qr_color_value(clean_value)
+                if color:
+                    params['dark'] = color
             elif clean_key in ('light', 'bgcolor'):
-                light_color = clean_value.replace('#', '')
-                if re.match(r'^[0-9A-Fa-f]{3,6}$', light_color):
-                    params['light'] = light_color
+                color = _qr_color_value(clean_value)
+                if color:
+                    params['light'] = color
             elif clean_key in ('ecl', 'eclevel'):
                 ecl = clean_value.upper()
                 if ecl in ('L', 'M', 'Q', 'H'):
                     params['ecl'] = ecl
+            elif clean_key == 'eyecolor':
+                # Цвет глаз — только сплошной hex (без '#').
+                eye_color = clean_value.replace('#', '')
+                if re.match(r'^[0-9A-Fa-f]{3,6}$', eye_color):
+                    params['eyeColor'] = eye_color
+            elif clean_key == 'eyestyle':
+                # 'circle' — просвет и точка глаза тоже скруглены.
+                if clean_value.lower() == 'circle':
+                    params['eyeStyle'] = 'circle'
             elif clean_key == 'centerimageurl':
                 if clean_value and clean_value.lower() not in ('none', 'false', 'null'):
                     params['centerImageUrl'] = clean_value
@@ -397,6 +454,51 @@ def parse_qr_config(qr_param_str: str) -> dict:
                         params['centerImageSizeRatio'] = logo_size
                 except ValueError:
                     pass
+            elif clean_key == 'logoshape':
+                # Форма подложки логотипа: круг / скруглённый квадрат / квадрат.
+                logo_shape = clean_value.lower()
+                if logo_shape in ('circle', 'rounded', 'square'):
+                    params['logoShape'] = logo_shape
+            elif clean_key == 'logoborderwidth':
+                try:
+                    logo_border = int(clean_value)
+                    if 0 <= logo_border <= 24:
+                        params['logoBorderWidth'] = logo_border
+                except ValueError:
+                    pass
+            elif clean_key == 'logobordercolor':
+                border_color = clean_value.replace('#', '')
+                if re.match(r'^[0-9A-Fa-f]{3,6}$', border_color):
+                    params['logoBorderColor'] = border_color
+            elif clean_key == 'bgimageurl':
+                if clean_value and \
+                        clean_value.lower() not in ('none', 'false', 'null'):
+                    params['bgImageUrl'] = clean_value
+            elif clean_key == 'bgblur':
+                try:
+                    bg_blur = int(clean_value)
+                    if 0 <= bg_blur <= 64:
+                        params['bgBlur'] = bg_blur
+                except ValueError:
+                    pass
+            elif clean_key == 'framecolor':
+                frame_color = clean_value.replace('#', '')
+                if re.match(r'^[0-9A-Fa-f]{3,6}$', frame_color):
+                    params['frameColor'] = frame_color
+            elif clean_key == 'framewidth':
+                try:
+                    frame_width = int(clean_value)
+                    if 1 <= frame_width <= 48:
+                        params['frameWidth'] = frame_width
+                except ValueError:
+                    pass
+            elif clean_key == 'captionpos':
+                if clean_value.lower() == 'inside':
+                    params['captionPos'] = 'inside'
+            elif clean_key == 'captionstyle':
+                caption_style = clean_value.lower()
+                if caption_style in ('pill', 'banner'):
+                    params['captionStyle'] = caption_style
             elif clean_key == 'caption':
                 params['caption'] = clean_value
             elif clean_key == 'captionfontfamily':
@@ -409,6 +511,7 @@ def parse_qr_config(qr_param_str: str) -> dict:
                 except ValueError:
                     pass
             elif clean_key == 'captionfontcolor':
+                # Градиент для текста подписи не рисуем — только сплошной hex.
                 caption_color = clean_value.replace('#', '')
                 if re.match(r'^[0-9A-Fa-f]{3,6}$', caption_color):
                     params['captionFontColor'] = caption_color

@@ -120,7 +120,6 @@ REFERRAL_COLUMNS = [
 ]
 
 BARCODE_CONFIG = {
-    'BASE_URL': 'https://quickchart.io/qr',
     'DEFAULT_SIZE': 300,
     'DEFAULT_MARGIN': 4,
     'DEFAULT_FG_COLOR': '000000',

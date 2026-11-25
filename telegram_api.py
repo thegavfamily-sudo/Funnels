@@ -28,11 +28,17 @@ class TelegramAPI:
 
     # -- low level ----------------------------------------------------------
 
-    def send_request(self, method: str, payload: Optional[dict] = None) -> dict:
+    def send_request(self, method: str, payload: Optional[dict] = None,
+                     files: Optional[dict] = None) -> dict:
         """POST query-метода Bot API; всегда возвращает dict (никогда не бросает)."""
         url = f'{self.base_url}/{method}'
         try:
-            resp = self._session.post(url, json=payload or {}, timeout=self.timeout)
+            if files:
+                resp = self._session.post(url, data=payload or {}, files=files,
+                                          timeout=self.timeout)
+            else:
+                resp = self._session.post(url, json=payload or {},
+                                          timeout=self.timeout)
             return resp.json()
         except Exception as error:  # noqa: BLE001 — как muteHttpExceptions в оригинале
             return {'ok': False, 'description': str(error)}
@@ -77,11 +83,29 @@ class TelegramAPI:
 
     def send_photo(self, chat_id: Any, photo: Any, caption: str = '',
                    options: Optional[dict] = None) -> Optional[int]:
-        payload = {'chat_id': chat_id, 'photo': photo, 'caption': caption,
+        payload = {'chat_id': chat_id, 'caption': caption,
                    'parse_mode': 'HTML'}
         if options:
             payload.update(options)
-        result = self.send_request('sendPhoto', payload)
+        if isinstance(photo, (bytes, bytearray)):
+            # Локально сгенерированная картинка (QR) — multipart-загрузка.
+            files = {'photo': ('image.png', bytes(photo), 'image/png')}
+            result = self.send_request('sendPhoto', payload, files=files)
+        else:
+            payload['photo'] = photo
+            result = self.send_request('sendPhoto', payload)
+        return result['result']['message_id'] if result.get('ok') else None
+
+    def send_document(self, chat_id: Any, document: bytes, filename: str,
+                      caption: str = '',
+                      options: Optional[dict] = None) -> Optional[int]:
+        payload = {'chat_id': chat_id, 'caption': caption,
+                   'parse_mode': 'HTML'}
+        if options:
+            payload.update(options)
+        # Локально сгенерированный документ (SVG-QR) — multipart-загрузка.
+        files = {'document': (filename, bytes(document), 'image/svg+xml')}
+        result = self.send_request('sendDocument', payload, files=files)
         return result['result']['message_id'] if result.get('ok') else None
 
     def send_media_group(self, chat_id: Any, media: list) -> Optional[list]:
