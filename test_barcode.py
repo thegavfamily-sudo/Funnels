@@ -32,7 +32,7 @@ def _png(data: bytes) -> Image.Image:
 class TestGradientSpec(unittest.TestCase):
     def test_parse_valid(self):
         g = _parse_gradient('linear-gradient(135deg, #FF0000, #0000FF)')
-        self.assertEqual(g, (135.0, '#FF0000', '#0000FF'))
+        self.assertEqual(g, ('linear', 135.0, ['#FF0000', '#0000FF']))
 
     def test_parse_negative_angle(self):
         g = _parse_gradient('linear-gradient(-45deg, #abc, #def012)')
@@ -101,7 +101,7 @@ class TestGenerateBarcode(unittest.TestCase):
         self.assertEqual(img.size, (300, 300))
 
     def test_gradient_image_geometry(self):
-        grad = _gradient_image(200, 100, 0, '#FF0000', '#0000FF')
+        grad = _gradient_image(200, 100, 0, ['#FF0000', '#0000FF'])
         self.assertEqual(grad.size, (200, 100))
         # 0deg = снизу вверх: внизу преобладает первый цвет (красный),
         # вверху — второй (синий); у границ интерполяция не даёт 255.
@@ -110,7 +110,7 @@ class TestGenerateBarcode(unittest.TestCase):
         self.assertGreater(bottom[0], bottom[2])
         self.assertGreater(top[2], top[0])
         # 90deg = слева направо.
-        grad90 = _gradient_image(200, 100, 90, '#FF0000', '#0000FF')
+        grad90 = _gradient_image(200, 100, 90, ['#FF0000', '#0000FF'])
         left = grad90.getpixel((5, 50))
         right = grad90.getpixel((195, 50))
         self.assertGreater(left[0], left[2])
@@ -274,6 +274,30 @@ class TestGenerateBarcode(unittest.TestCase):
         plate = img.getpixel((127, 150))    # подложка без логотипа
         self.assertEqual(edge, (255, 0, 0))
         self.assertNotEqual(edge, plate)
+
+    def test_logo_plate_off_transparent(self):
+        # logoPlate=0: подложки нет — сквозь прозрачный логотип виден код;
+        # с подложкой (дефолт) центр сплошь светлый.
+        from unittest import mock
+        buf = io.BytesIO()
+        Image.new('RGBA', (40, 40), (0, 0, 0, 0)).save(buf, format='PNG')
+        resp = mock.Mock(status_code=200, content=buf.getvalue())
+        base = {
+            'size': 300, 'centerImageUrl': 'https://example.com/logo.png',
+            'dark': '000000', 'light': 'FFFFFF',
+        }
+        with mock.patch('requests.get', return_value=resp):
+            with_plate = _png(generate_barcode_image('lp1',
+                                                     qr_config=dict(base)))
+            without = _png(generate_barcode_image(
+                'lp2', qr_config={**base, 'logoPlate': 0}))
+        # Подложка 48px по центру закрывает модули — ровный светлый.
+        self.assertEqual(with_plate.getpixel((150, 150)), (255, 255, 255))
+        # Без подложки в той же области остаются модули кода.
+        px = without.load()
+        dark = sum(1 for y in range(130, 170) for x in range(130, 170)
+                   if px[x, y] == (0, 0, 0))
+        self.assertGreater(dark, 0, 'модули должны быть видны без подложки')
 
     def test_caption_inside_banner(self):
         # captionPos=inside не добавляет полосу; баннер на нижней строке.

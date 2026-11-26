@@ -357,13 +357,37 @@ def _qr_fit_mask(mask: Any, size: int, total_h: int) -> Any:
     return full
 
 
+# Запасные шрифты с кириллицей. Шрифт Pillow по умолчанию (load_default)
+# содержит только латиницу — без запасных шрифтов подпись на картинке
+# из Телеграма отображается «квадратиками» (tofu).
+_QR_FALLBACK_FONTS = (
+    'DejaVuSans.ttf',
+    'LiberationSans-Regular.ttf',
+    'NotoSans-Regular.ttf',
+    'FreeSans.ttf',
+    'Ubuntu-R.ttf',
+)
+
+# Имена из админки, которых нет на Linux-сервере, → аналоги с кириллицей.
+_QR_FONT_ALIASES = {
+    'arial': ('LiberationSans-Regular.ttf', 'DejaVuSans.ttf'),
+    'times new roman': ('LiberationSerif-Regular.ttf', 'DejaVuSerif.ttf'),
+    'courier new': ('LiberationMono-Regular.ttf', 'DejaVuSansMono.ttf'),
+}
+
+
 def _qr_font(size: int, family: Any = None) -> Any:
+    """Шрифт подписи QR: сначала запрошенное семейство, затем с кириллицей."""
     from PIL import ImageFont
-    if family:
+    name = str(family or '').strip()
+    candidates = [name] if name else []
+    candidates += list(_QR_FONT_ALIASES.get(name.lower(), ()))
+    candidates += [f for f in _QR_FALLBACK_FONTS if f not in candidates]
+    for candidate in candidates:
         try:
-            return ImageFont.truetype(str(family), size)
-        except Exception:  # noqa: BLE001 — шрифт не найден, берём дефолтный
-            pass
+            return ImageFont.truetype(candidate, size)
+        except Exception:  # noqa: BLE001 — шрифт не найден, пробуем следующий
+            continue
     try:
         return ImageFont.load_default(size=size)
     except TypeError:  # noqa: BLE001 — старый Pillow без параметра size
@@ -869,15 +893,21 @@ def _generate_qr_svg(qr: Any, size: int, total_h: int,
                     factor = max_side / float(max(logo_w, logo_h))
                     logo_w = max(1, int(logo_w * factor))
                     logo_h = max(1, int(logo_h * factor))
-                pad_l = max(4, max(logo_w, logo_h) // 10)
-                shape = p.get('logo_shape') or ''
+                plate_on = p.get('logo_plate', True)
+                pad_l = (max(4, max(logo_w, logo_h) // 10)
+                         if plate_on else 0)
+                # Форма подложки имеет смысл только с подложкой; без неё
+                # границы задаёт сам логотип (его альфа-канал).
+                shape = (p.get('logo_shape') or '') if plate_on else ''
                 if shape in ('circle', 'rounded'):
                     # Квадратная подложка, логотип по центру — как в PNG.
                     plate_w = plate_h = max(logo_w, logo_h) + pad_l * 2
                 else:
                     plate_w, plate_h = logo_w + pad_l * 2, logo_h + pad_l * 2
-                if shape == 'circle':
-                    plate_rx: Any = plate_w / 2.0
+                if not plate_on:
+                    plate_rx: Any = 0
+                elif shape == 'circle':
+                    plate_rx = plate_w / 2.0
                 elif shape == 'rounded':
                     plate_rx = max(1, plate_w * 22 // 100)
                 elif shape == 'square':
@@ -887,7 +917,7 @@ def _generate_qr_svg(qr: Any, size: int, total_h: int,
                     plate_rx = pad_l + 4
                 logo_border = int(p.get('logo_border_width') or 0)
                 bw = (max(1, round(logo_border * size / 300))
-                      if logo_border > 0 else 0)
+                      if logo_border > 0 and plate_on else 0)
                 total_w = plate_w + 2 * bw
                 total_l = plate_h + 2 * bw
                 ox = (size - total_w) // 2
@@ -899,8 +929,9 @@ def _generate_qr_svg(qr: Any, size: int, total_h: int,
                     body.append(rect(ox, oy, total_w, total_l,
                                      border_color, outer_rx))
                 px, py = ox + bw, oy + bw
-                body.append(rect(px, py, plate_w, plate_h, light_hex,
-                                 plate_rx or None))
+                if plate_on:
+                    body.append(rect(px, py, plate_w, plate_h, light_hex,
+                                     plate_rx or None))
                 clip = ''
                 if plate_rx:
                     # Обрезка картинки по форме подложки.
@@ -1055,6 +1086,10 @@ def generate_barcode_image(data: str, options: Optional[dict] = None,
         logo_shape = str(pick('logoShape', default='') or '').strip().lower()
         logo_border_width = _qr_int(pick('logoBorderWidth'), 0, 0, 24)
         logo_border_color = _qr_hex(pick('logoBorderColor'))
+        # Подложка под логотипом: по умолчанию вкл; '0'/False — без неё
+        # (прозрачные места логотипа остаются прозрачными, виден код).
+        logo_plate = str(pick('logoPlate', default='1')).strip().lower() \
+            not in ('0', 'off', 'false', 'no')
 
         # Фоновая картинка: cover + блюр, подложка light 55% сверху.
         bg_url = str(pick('bgImageUrl') or '').strip()
@@ -1140,6 +1175,7 @@ def generate_barcode_image(data: str, options: Optional[dict] = None,
                 'logo_shape': logo_shape, 'logo_ratio': logo_ratio,
                 'logo_border_width': logo_border_width,
                 'logo_border_color': logo_border_color,
+                'logo_plate': logo_plate,
                 'caption': caption, 'caption_pos': caption_pos,
                 'caption_style': caption_style, 'caption_box': caption_box,
                 'font_size': font_size, 'font_color': font_color,
@@ -1241,61 +1277,72 @@ def generate_barcode_image(data: str, options: Optional[dict] = None,
                     logo.thumbnail((max(1, int(size * ratio)),
                                     max(1, int(size * ratio))),
                                    Image.LANCZOS)
-                    # Светлая подложка под логотипом — чтобы код остался
-                    # читаемым на границе картинки и модулей.
-                    pad = max(4, max(logo.size) // 10)
-                    plate_color = _qr_rgb(light_hex) + (255,)
-                    plate_radius = 0
-                    if logo_shape in ('circle', 'rounded'):
-                        # Квадратная подложка, логотип по центру: круг или
-                        # квадрат со скруглением — как в превью админки.
-                        box_w = box_h = max(logo.size) + pad * 2
-                        plate = Image.new('RGBA', (box_w, box_h), plate_color)
-                        plate.paste(
-                            logo,
-                            ((box_w - logo.width) // 2,
-                             (box_h - logo.height) // 2),
-                            logo)
-                        shape_mask = Image.new('L', (box_w, box_h), 0)
-                        mask_draw = ImageDraw.Draw(shape_mask)
-                        if logo_shape == 'circle':
-                            mask_draw.ellipse((0, 0, box_w - 1, box_h - 1),
-                                              fill=255)
-                        else:
-                            plate_radius = max(1, box_w * 22 // 100)
-                            mask_draw.rounded_rectangle(
-                                (0, 0, box_w - 1, box_h - 1),
-                                radius=plate_radius, fill=255)
-                        plate.putalpha(shape_mask)
+                    if not logo_plate:
+                        # Без подложки: логотип ложится на код как есть —
+                        # прозрачные места PNG остаются прозрачными,
+                        # модули видны сквозь них. Обводка/форма — только
+                        # с подложкой.
+                        plate = logo
                     else:
-                        box_w = logo.width + pad * 2
-                        box_h = logo.height + pad * 2
-                        plate = Image.new('RGBA', (box_w, box_h), plate_color)
-                        plate.paste(logo, (pad, pad), logo)
-
-                    if logo_border_width > 0:
-                        # Обводка подложки: тот же контур, увеличенный на
-                        # bw = logoBorderWidth (px при size=300) со стороны.
-                        bw = max(1, round(logo_border_width * size / 300))
-                        border_rgba = _qr_rgb(
-                            logo_border_color or dark_hex) + (255,)
-                        outer = Image.new(
-                            'RGBA', (box_w + 2 * bw, box_h + 2 * bw),
-                            border_rgba)
+                        # Светлая подложка под логотипом — чтобы код
+                        # остался читаемым на границе картинки и модулей.
+                        pad = max(4, max(logo.size) // 10)
+                        plate_color = _qr_rgb(light_hex) + (255,)
+                        plate_radius = 0
                         if logo_shape in ('circle', 'rounded'):
-                            outer_mask = Image.new('L', outer.size, 0)
-                            outer_draw = ImageDraw.Draw(outer_mask)
+                            # Квадратная подложка, логотип по центру: круг
+                            # или квадрат со скруглением — как в превью.
+                            box_w = box_h = max(logo.size) + pad * 2
+                            plate = Image.new('RGBA', (box_w, box_h),
+                                              plate_color)
+                            plate.paste(
+                                logo,
+                                ((box_w - logo.width) // 2,
+                                 (box_h - logo.height) // 2),
+                                logo)
+                            shape_mask = Image.new('L', (box_w, box_h), 0)
+                            mask_draw = ImageDraw.Draw(shape_mask)
                             if logo_shape == 'circle':
-                                outer_draw.ellipse(
-                                    (0, 0, outer.width - 1, outer.height - 1),
-                                    fill=255)
+                                mask_draw.ellipse(
+                                    (0, 0, box_w - 1, box_h - 1), fill=255)
                             else:
-                                outer_draw.rounded_rectangle(
-                                    (0, 0, outer.width - 1, outer.height - 1),
-                                    radius=plate_radius + bw, fill=255)
-                            outer.putalpha(outer_mask)
-                        outer.paste(plate, (bw, bw), plate)
-                        plate = outer
+                                plate_radius = max(1, box_w * 22 // 100)
+                                mask_draw.rounded_rectangle(
+                                    (0, 0, box_w - 1, box_h - 1),
+                                    radius=plate_radius, fill=255)
+                            plate.putalpha(shape_mask)
+                        else:
+                            box_w = logo.width + pad * 2
+                            box_h = logo.height + pad * 2
+                            plate = Image.new('RGBA', (box_w, box_h),
+                                              plate_color)
+                            plate.paste(logo, (pad, pad), logo)
+
+                        if logo_border_width > 0:
+                            # Обводка подложки: тот же контур, увеличенный
+                            # на bw = logoBorderWidth (px при size=300).
+                            bw = max(1, round(logo_border_width * size / 300))
+                            border_rgba = _qr_rgb(
+                                logo_border_color or dark_hex) + (255,)
+                            outer = Image.new(
+                                'RGBA', (box_w + 2 * bw, box_h + 2 * bw),
+                                border_rgba)
+                            if logo_shape in ('circle', 'rounded'):
+                                outer_mask = Image.new('L', outer.size, 0)
+                                outer_draw = ImageDraw.Draw(outer_mask)
+                                if logo_shape == 'circle':
+                                    outer_draw.ellipse(
+                                        (0, 0, outer.width - 1,
+                                         outer.height - 1),
+                                        fill=255)
+                                else:
+                                    outer_draw.rounded_rectangle(
+                                        (0, 0, outer.width - 1,
+                                         outer.height - 1),
+                                        radius=plate_radius + bw, fill=255)
+                                outer.putalpha(outer_mask)
+                            outer.paste(plate, (bw, bw), plate)
+                            plate = outer
 
                     # Центр квадрата QR (не всей картинки — внизу может
                     # быть полоса подписи).
@@ -2030,6 +2077,13 @@ def handle_dice_message(ctx: BotContext, chat_id, step: Step, options: dict,
 ADVENT_BUTTONS_PER_ROW = 8
 
 
+def advent_web_app_url(funnel_id: Any) -> str:
+    """Ссылка мини-аппа адвента для кнопки Web App на шаге воронки."""
+    fid = str(funnel_id or '').strip()
+    base = f'{config.SUPABASE_URL.rstrip("/")}/functions/v1/advent'
+    return f'{base}?funnel={fid}' if fid else base
+
+
 def _advent_opened_set(ctx: BotContext, days: int, user_id: Any) -> set[int]:
     """Номера уже открытых дверей: тег advent_opened_<N> == '1'."""
     if not user_id:
@@ -2044,7 +2098,8 @@ def build_advent_keyboard(ctx: BotContext, step: Step,
     """Клавиатура адвента: ряды по 8 дверей, callback = adv_<N>.
 
     Эмодзи двери: ✅ — открыта; 🎁 — не открыта, но день наступил (1..day_index);
-    🔒 — будущая.
+    🔒 — будущая. Под сеткой идут кнопки шага (если заданы), а если своей
+    web app-кнопки нет — добавляется автоматическая «🎄 Открыть календарь».
     """
     adv = step.advent
     if not adv:
@@ -2068,6 +2123,18 @@ def build_advent_keyboard(ctx: BotContext, step: Step,
             row = []
     if row:
         rows.append(row)
+
+    # Кнопки шага — под сеткой (web app вставлена вручную, «Далее» и пр.).
+    parsed = (step.inline_keyboard or {}).get('parsedData') or {}
+    extra = keyboards.build_inline_keyboard_from_parsed_data(parsed)
+    if extra:
+        rows.extend(extra['inline_keyboard'])
+
+    # Авто-кнопка мини-аппа: если свою web app не добавили руками.
+    has_web_app = any('web_app' in btn for r in rows for btn in r)
+    if not has_web_app:
+        rows.append([{'text': '🎄 Открыть календарь',
+                      'web_app': {'url': advent_web_app_url(ctx.funnel_id)}}])
     return {'inline_keyboard': rows}
 
 

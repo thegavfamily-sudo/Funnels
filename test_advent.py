@@ -173,29 +173,32 @@ class TestAdventKeyboard(unittest.TestCase):
         step = mk({'type': 'advent', 'advent_start': ''})
         keyboard = build_advent_keyboard(_FakeCtx(), step, 'u1')
         rows = keyboard['inline_keyboard']
-        self.assertEqual([len(row) for row in rows], [8, 8, 8])
-        self.assertEqual(len(self._texts(keyboard)), 24)
+        # 3 ряда дверей + ряд с авто-кнопкой web app.
+        self.assertEqual([len(row) for row in rows], [8, 8, 8, 1])
+        self.assertEqual(len(self._texts(keyboard)), 25)
 
     def test_callback_data_adv_n(self):
         step = mk({'type': 'advent', 'advent_start': ''})
         keyboard = build_advent_keyboard(_FakeCtx(), step, 'u1')
         callbacks = [btn['callback_data'] for row in keyboard['inline_keyboard']
-                     for btn in row]
+                     for btn in row if 'callback_data' in btn]
         self.assertEqual(callbacks,
                          [f'adv_{n}' for n in range(1, 25)])
 
     def test_empty_start_all_doors_available(self):
-        # Пустая дата старта — все двери 🎁 (доступны).
+        # Пустая дата старта — все двери 🎁 (доступны) + авто-кнопка.
         step = mk({'type': 'advent', 'advent_start': ''})
         keyboard = build_advent_keyboard(_FakeCtx(), step, 'u1')
         self.assertEqual(self._texts(keyboard),
-                         [f'🎁 {n}' for n in range(1, 25)])
+                         [f'🎁 {n}' for n in range(1, 25)]
+                         + ['🎄 Открыть календарь'])
 
     def test_future_start_all_doors_closed(self):
         step = mk({'type': 'advent', 'advent_start': '2099-01-01'})
         keyboard = build_advent_keyboard(_FakeCtx(), step, 'u1')
         self.assertEqual(self._texts(keyboard),
-                         [f'🔒 {n}' for n in range(1, 25)])
+                         [f'🔒 {n}' for n in range(1, 25)]
+                         + ['🎄 Открыть календарь'])
 
     def test_opened_available_closed_emoji(self):
         # day_index = 3: двери 1..3 доступны 🎁, дальше 🔒; 2-я открыта ✅.
@@ -205,7 +208,45 @@ class TestAdventKeyboard(unittest.TestCase):
         with mock.patch('steps.advent_current_day', return_value=3):
             keyboard = build_advent_keyboard(ctx, step, 'u1')
         self.assertEqual(self._texts(keyboard),
-                         ['🎁 1', '✅ 2', '🎁 3', '🔒 4', '🔒 5', '🔒 6'])
+                         ['🎁 1', '✅ 2', '🎁 3', '🔒 4', '🔒 5', '🔒 6',
+                          '🎄 Открыть календарь'])
+
+    def test_auto_web_app_button_url(self):
+        # Авто-кнопка: web app со ссылкой мини-аппа своей воронки.
+        step = mk({'type': 'advent', 'advent_start': ''})
+        keyboard = build_advent_keyboard(_FakeCtx(), step, 'u1')
+        last_row = keyboard['inline_keyboard'][-1]
+        self.assertEqual(len(last_row), 1)
+        btn = last_row[0]
+        self.assertEqual(btn['text'], '🎄 Открыть календарь')
+        url = btn['web_app']['url']
+        self.assertIn('/functions/v1/advent', url)
+        self.assertIn('funnel=f1', url)
+
+    def test_step_buttons_come_before_auto_web_app(self):
+        # Кнопки шага (например, «Далее») идут под сеткой, до авто-кнопки.
+        step = mk({'type': 'advent', 'advent_start': '', 'advent_days': '3',
+                   'inline_keyboard': json.dumps([[
+                       {'text': 'Далее', 'type': 'callback', 'step': 2,
+                        'value': '0'}]])})
+        keyboard = build_advent_keyboard(_FakeCtx(), step, 'u1')
+        rows = keyboard['inline_keyboard']
+        self.assertEqual(len(rows), 3)   # ряд дверей + кнопка + авто web app
+        self.assertEqual(rows[1][0]['text'], 'Далее')
+        self.assertIn('callback_data', rows[1][0])
+        self.assertEqual(rows[2][0]['text'], '🎄 Открыть календарь')
+
+    def test_manual_web_app_not_duplicated(self):
+        # Своя web app-кнопка на шаге — авто-кнопка не добавляется.
+        step = mk({'type': 'advent', 'advent_start': '', 'advent_days': '3',
+                   'inline_keyboard': json.dumps([[
+                       {'text': 'Календарь', 'type': 'web app',
+                        'value': 'https://example.com/advent'}]])})
+        keyboard = build_advent_keyboard(_FakeCtx(), step, 'u1')
+        rows = keyboard['inline_keyboard']
+        web_apps = [btn for row in rows for btn in row if 'web_app' in btn]
+        self.assertEqual(len(web_apps), 1)
+        self.assertEqual(web_apps[0]['text'], 'Календарь')
 
     def test_non_one_tag_is_not_opened(self):
         # Тег без значения '1' не считается открытием.

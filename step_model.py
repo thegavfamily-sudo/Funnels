@@ -466,6 +466,13 @@ def parse_qr_config(qr_param_str: str) -> dict:
                 logo_shape = clean_value.lower()
                 if logo_shape in ('circle', 'rounded', 'square'):
                     params['logoShape'] = logo_shape
+            elif clean_key == 'logoplate':
+                # Подложка под логотипом: '0' — выкл, логотип с прозрачным
+                # фоном ложится на код как есть (иначе вкл, как раньше).
+                if clean_value.lower() in ('0', 'off', 'false', 'no'):
+                    params['logoPlate'] = False
+                elif clean_value.lower() in ('1', 'on', 'true', 'yes'):
+                    params['logoPlate'] = True
             elif clean_key == 'logoborderwidth':
                 try:
                     logo_border = int(clean_value)
