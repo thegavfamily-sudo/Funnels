@@ -444,6 +444,13 @@ def parse_qr_config(qr_param_str: str) -> dict:
                 # 'circle' — просвет и точка глаза тоже скруглены.
                 if clean_value.lower() == 'circle':
                     params['eyeStyle'] = 'circle'
+            elif clean_key == 'eyeshape':
+                # Форма угловых элементов: квадрат / круг / ромб / капля
+                # / восьмиугольник.
+                eye_shape = clean_value.lower()
+                if eye_shape in ('square', 'circle', 'diamond',
+                                 'drop', 'octagon'):
+                    params['eyeShape'] = eye_shape
             elif clean_key == 'centerimageurl':
                 if clean_value and clean_value.lower() not in ('none', 'false', 'null'):
                     params['centerImageUrl'] = clean_value

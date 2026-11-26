@@ -167,30 +167,91 @@ def _qr_drop_corner(modules: Any, row: int, col: int, count: int) -> str:
     return 'se'
 
 
+def _qr_diamond(draw: Any, bounds: tuple, fill: int) -> None:
+    """Ромб по серединам сторон прямоугольника bounds — как style=diamond."""
+    x0, y0, x1, y1 = bounds
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+    draw.polygon([(cx, y0), (x1, cy), (cx, y1), (x0, cy)], fill=fill)
+
+
+def _qr_octagon(draw: Any, bounds: tuple, cut: float, fill: int) -> None:
+    """Восьмиугольник: прямоугольник bounds со срезанными углами cut."""
+    x0, y0, x1, y1 = bounds
+    draw.polygon([
+        (x0 + cut, y0), (x1 - cut, y0),
+        (x1, y0 + cut), (x1, y1 - cut),
+        (x1 - cut, y1), (x0 + cut, y1),
+        (x0, y1 - cut), (x0, y0 + cut),
+    ], fill=fill)
+
+
 def _qr_draw_eyes(draw: Any, qr: Any, eye_radius: float,
-                  eye_style: str = '') -> None:
+                  eye_style: str = '', eye_shape: str = '') -> None:
     """Три угловых глаза: внешний контур 7×7 + просвет 5×5 + точка 3×3.
 
     Внешний контур скругляется на долю eye_radius от стороны в 7 модулей.
     eye_style='circle' — просвет и точка тоже скруглены той же долей
     от СВОЕЙ стороны (r_hole ≤ 2.5·box, r_dot ≤ 1.5·box); иначе —
     квадратные, как в превью админки.
+    eye_shape задаёт форму целиком: 'square' — прямые углы (eye_radius
+    не берётся), 'circle' — круги, 'diamond' — ромбы, 'octagon' —
+    восьмиугольники (там eye_radius и eye_style не участвуют);
+    'drop' — капля: три угла по радиусу (при нулевом — 0.5), внутренний
+    угол (в сторону центра кода) прямой. Геометрия та же, что в превью.
     """
     box = max(1, int(qr.box_size))
     border = max(0, int(qr.border))
     count = qr.modules_count
-    eye_px = int(round(7 * box * eye_radius))
+    offset = border * box
+    far = (border + count - 7) * box
+    origins = ((offset, offset), (far, offset), (offset, far))
+    if eye_shape in ('circle', 'diamond', 'octagon'):
+        for x0, y0 in origins:
+            outer = (x0, y0, x0 + 7 * box - 1, y0 + 7 * box - 1)
+            hole = (x0 + box, y0 + box,
+                    x0 + 6 * box - 1, y0 + 6 * box - 1)
+            dot = (x0 + 2 * box, y0 + 2 * box,
+                   x0 + 5 * box - 1, y0 + 5 * box - 1)
+            if eye_shape == 'circle':
+                draw.ellipse(outer, fill=255)
+                draw.ellipse(hole, fill=0)
+                draw.ellipse(dot, fill=255)
+            elif eye_shape == 'diamond':
+                _qr_diamond(draw, outer, 255)
+                _qr_diamond(draw, hole, 0)
+                _qr_diamond(draw, dot, 255)
+            else:  # 'octagon'
+                _qr_octagon(draw, outer, 1.5 * box, 255)
+                _qr_octagon(draw, hole, 1.0 * box, 0)
+                _qr_octagon(draw, dot, 0.5 * box, 255)
+        return
+    eye_px = (0 if eye_shape == 'square'
+              else int(round(7 * box * eye_radius)))
+    if eye_shape == 'drop':
+        # Три угла по радиусу (при нулевом — 0.5, чтобы капля читалась).
+        eye_px = (int(round(7 * box * eye_radius)) if eye_radius > 0
+                  else int(round(3.5 * box)))
+    eye_px = min(eye_px, (7 * box) // 2)
     hole_r = int(min(round(5 * box * eye_radius), 2.5 * box))
     dot_r = int(min(round(3 * box * eye_radius), 1.5 * box))
     rounded_holes = (eye_style == 'circle')
-    offset = border * box
-    far = (border + count - 7) * box
-    for x0, y0 in ((offset, offset), (far, offset), (offset, far)):
+    for idx, (x0, y0) in enumerate(origins):
         outer = (x0, y0, x0 + 7 * box - 1, y0 + 7 * box - 1)
         if eye_px > 0:
             draw.rounded_rectangle(outer, radius=eye_px, fill=255)
         else:
             draw.rectangle(outer, fill=255)
+        if eye_shape == 'drop' and eye_px > 0:
+            # Внутренний угол (ближе к центру кода) возвращаем квадратом.
+            x1, y1 = outer[2], outer[3]
+            if idx == 0:  # глаз слева-сверху — прямой юго-восток
+                corner = (x1 - eye_px + 1, y1 - eye_px + 1, x1, y1)
+            elif idx == 1:  # справа-сверху — юго-запад
+                corner = (x0, y1 - eye_px + 1, x0 + eye_px - 1, y1)
+            else:  # слева-снизу — северо-восток
+                corner = (x1 - eye_px + 1, y0, x1, y0 + eye_px - 1)
+            draw.rectangle(corner, fill=255)
         hole = (x0 + box, y0 + box, x0 + 6 * box - 1, y0 + 6 * box - 1)
         if rounded_holes and hole_r > 0:
             draw.rounded_rectangle(hole, radius=hole_r, fill=0)
@@ -204,7 +265,8 @@ def _qr_draw_eyes(draw: Any, qr: Any, eye_radius: float,
 
 
 def _qr_modules_mask(qr: Any, dot_radius: float, eye_radius: float,
-                     module_style: str = '', eye_style: str = '') -> Any:
+                     module_style: str = '', eye_style: str = '',
+                     eye_shape: str = '') -> Any:
     """Маска кода (белые модули): скругление/стили модулей + три глаза.
 
     dot_radius — доля стороны модуля (0..0.5): 0.5 даёт круги.
@@ -213,7 +275,8 @@ def _qr_modules_mask(qr: Any, dot_radius: float, eye_radius: float,
     «засовывается» квадратом (см. _qr_drop_corner). Глаза всегда
     рисуются блоком глаз — не ромбом и не каплей.
     eye_radius — независимая доля для внешнего контура глаз; при
-    eye_style='circle' просвет и точка тоже скруглены.
+    eye_style='circle' просвет и точка тоже скруглены; eye_shape
+    (square/circle/diamond) задаёт форму угловых элементов целиком.
     """
     from PIL import Image, ImageDraw
 
@@ -262,11 +325,12 @@ def _qr_modules_mask(qr: Any, dot_radius: float, eye_radius: float,
                     sq = (x1 - radius + 1, y1 - radius + 1, x1, y1)
                 draw.rectangle(sq, fill=255)
 
-    _qr_draw_eyes(draw, qr, eye_radius, eye_style)
+    _qr_draw_eyes(draw, qr, eye_radius, eye_style, eye_shape)
     return mask
 
 
-def _qr_eyes_mask(qr: Any, eye_radius: float, eye_style: str = '') -> Any:
+def _qr_eyes_mask(qr: Any, eye_radius: float, eye_style: str = '',
+                  eye_shape: str = '') -> Any:
     """Маска ТОЛЬКО трёх глаз — для отдельного слоя eyeColor."""
     from PIL import Image, ImageDraw
 
@@ -275,7 +339,7 @@ def _qr_eyes_mask(qr: Any, eye_radius: float, eye_style: str = '') -> Any:
     count = qr.modules_count
     side = (count + 2 * border) * box
     mask = Image.new('L', (side, side), 0)
-    _qr_draw_eyes(ImageDraw.Draw(mask), qr, eye_radius, eye_style)
+    _qr_draw_eyes(ImageDraw.Draw(mask), qr, eye_radius, eye_style, eye_shape)
     return mask
 
 
@@ -661,8 +725,10 @@ def _generate_qr_svg(qr: Any, size: int, total_h: int,
     # с обводкой шириной box по центральной траектории 6×6 (со смещением
     # box/2): красится ровно кольцо [x0, x0+7box] × [y0, y0+7box].
     eye_fill = p.get('eye_color') or dark_fill
+    eye_shape = p.get('eye_shape') or ''
     eye_radius = float(p.get('eye_radius') or 0)
-    eye_px = int(round(7 * box * eye_radius))
+    eye_px = (0 if eye_shape == 'square'
+              else int(round(7 * box * eye_radius)))
     # Внешний rx видимого кольца = eye_px − box/2 (у обводки наружу box/2).
     ring_rx = max(0.0, eye_px - box / 2.0)
     dot_r = (int(min(round(3 * box * eye_radius), 1.5 * box))
@@ -670,17 +736,113 @@ def _generate_qr_svg(qr: Any, size: int, total_h: int,
     near = pad + border * box
     far = pad + (border + count - 7) * box
     ring_w = 6 * box
-    for x0, y0 in ((near, near), (far, near), (near, far)):
-        ring = ('<rect x="%s" y="%s" width="%s" height="%s" fill="none" '
-                'stroke=%s stroke-width="%s"'
-                % (_svg_num(x0 + box / 2.0), _svg_num(y0 + box / 2.0),
-                   _svg_num(ring_w), _svg_num(ring_w), attr(eye_fill),
-                   _svg_num(box)))
-        if ring_rx > 0:
-            ring += ' rx="%s"' % _svg_num(ring_rx)
-        ring += '/>'
-        dot = rect(x0 + 2 * box, y0 + 2 * box, 3 * box, 3 * box, None,
-                   dot_r or None)
+
+    def diamond_d(cx: float, cy: float, half: float) -> str:
+        # Ромб по серединам сторон квадрата half×half от центра (cx, cy).
+        return ('M %s,%s L %s,%s L %s,%s L %s,%s Z' % (
+            _svg_num(cx), _svg_num(cy - half),
+            _svg_num(cx + half), _svg_num(cy),
+            _svg_num(cx), _svg_num(cy + half),
+            _svg_num(cx - half), _svg_num(cy)))
+
+    def rect_d(x: float, y: float, w: float, h: float) -> str:
+        return ('M %s,%s H %s V %s H %s Z' % (
+            _svg_num(x), _svg_num(y), _svg_num(x + w),
+            _svg_num(y + h), _svg_num(x)))
+
+    def rr_d(x: float, y: float, size: float, tl: float, tr: float,
+             br: float, bl: float) -> str:
+        # Прямоугольник size×size со скруглениями по углам (0 — прямой).
+        out = ['M %s,%s' % (_svg_num(x + tl), _svg_num(y)),
+               'L %s,%s' % (_svg_num(x + size - tr), _svg_num(y))]
+        if tr > 0:
+            out.append('A %s,%s 0 0 1 %s,%s' % (
+                _svg_num(tr), _svg_num(tr),
+                _svg_num(x + size), _svg_num(y + tr)))
+        out.append('L %s,%s' % (_svg_num(x + size), _svg_num(y + size - br)))
+        if br > 0:
+            out.append('A %s,%s 0 0 1 %s,%s' % (
+                _svg_num(br), _svg_num(br),
+                _svg_num(x + size - br), _svg_num(y + size)))
+        out.append('L %s,%s' % (_svg_num(x + bl), _svg_num(y + size)))
+        if bl > 0:
+            out.append('A %s,%s 0 0 1 %s,%s' % (
+                _svg_num(bl), _svg_num(bl),
+                _svg_num(x), _svg_num(y + size - bl)))
+        out.append('L %s,%s' % (_svg_num(x), _svg_num(y + tl)))
+        if tl > 0:
+            out.append('A %s,%s 0 0 1 %s,%s' % (
+                _svg_num(tl), _svg_num(tl),
+                _svg_num(x + tl), _svg_num(y)))
+        out.append('Z')
+        return ' '.join(out)
+
+    def oct_d(x: float, y: float, size: float, cut: float) -> str:
+        # Восьмиугольник: квадрат size×size со срезанными углами cut.
+        right, bottom = x + size, y + size
+        return ('M %s,%s L %s,%s L %s,%s L %s,%s L %s,%s L %s,%s '
+                'L %s,%s L %s,%s Z') % (
+            _svg_num(x + cut), _svg_num(y),
+            _svg_num(right - cut), _svg_num(y),
+            _svg_num(right), _svg_num(y + cut),
+            _svg_num(right), _svg_num(bottom - cut),
+            _svg_num(right - cut), _svg_num(bottom),
+            _svg_num(x + cut), _svg_num(bottom),
+            _svg_num(x), _svg_num(bottom - cut),
+            _svg_num(x), _svg_num(y + cut))
+
+    for idx, (x0, y0) in enumerate(((near, near), (far, near), (near, far))):
+        cx = x0 + 3.5 * box
+        cy = y0 + 3.5 * box
+        if eye_shape == 'circle':
+            # Кольцо: ellipse r=3box под обводку box → кольцо 2.5..3.5box.
+            ring = ('<ellipse cx="%s" cy="%s" rx="%s" ry="%s" fill="none" '
+                    'stroke=%s stroke-width="%s"/>'
+                    % (_svg_num(cx), _svg_num(cy), _svg_num(3 * box),
+                       _svg_num(3 * box), attr(eye_fill), _svg_num(box)))
+            dot = ('<ellipse cx="%s" cy="%s" rx="%s" ry="%s"/>'
+                   % (_svg_num(cx), _svg_num(cy), _svg_num(1.5 * box),
+                      _svg_num(1.5 * box)))
+        elif eye_shape == 'diamond':
+            # Ромб кольцом (evenodd): внешний контур минус просвет + точка.
+            ring = ('<path d="%s %s" fill-rule="evenodd"/>'
+                    % (diamond_d(cx, cy, 3.5 * box),
+                       diamond_d(cx, cy, 2.5 * box)))
+            dot = '<path d="%s"/>' % diamond_d(cx, cy, 1.5 * box)
+        elif eye_shape == 'octagon':
+            # Восьмиугольник кольцом (evenodd) + такая же точка.
+            ring = ('<path d="%s %s" fill-rule="evenodd"/>'
+                    % (oct_d(x0, y0, 7 * box, 1.5 * box),
+                       oct_d(x0 + box, y0 + box, 5 * box, 1.0 * box)))
+            dot = ('<path d="%s"/>'
+                   % oct_d(x0 + 2 * box, y0 + 2 * box, 3 * box, 0.5 * box))
+        elif eye_shape == 'drop':
+            # Капля: три угла по радиусу (при нулевом — 0.5), внутренний
+            # угол (ближе к центру кода) прямой; кольцо — вычитанием.
+            r = (7 * box * eye_radius) if eye_radius > 0 else 3.5 * box
+            r = min(r, 3.5 * box)
+            if idx == 0:  # слева-сверху — прямой юго-восток
+                corners = (r, r, 0.0, r)
+            elif idx == 1:  # справа-сверху — юго-запад
+                corners = (r, r, r, 0.0)
+            else:  # слева-снизу — северо-восток
+                corners = (r, 0.0, r, r)
+            ring = ('<path d="%s %s" fill-rule="evenodd"/>'
+                    % (rr_d(x0, y0, 7 * box, *corners),
+                       rect_d(x0 + box, y0 + box, 5 * box, 5 * box)))
+            dot = rect(x0 + 2 * box, y0 + 2 * box, 3 * box, 3 * box, None,
+                       dot_r or None)
+        else:
+            ring = ('<rect x="%s" y="%s" width="%s" height="%s" fill="none" '
+                    'stroke=%s stroke-width="%s"'
+                    % (_svg_num(x0 + box / 2.0), _svg_num(y0 + box / 2.0),
+                       _svg_num(ring_w), _svg_num(ring_w), attr(eye_fill),
+                       _svg_num(box)))
+            if ring_rx > 0:
+                ring += ' rx="%s"' % _svg_num(ring_rx)
+            ring += '/>'
+            dot = rect(x0 + 2 * box, y0 + 2 * box, 3 * box, 3 * box, None,
+                       dot_r or None)
         body.append('<g fill=%s>%s%s</g>' % (attr(eye_fill), ring, dot))
 
     # -- декоративная рамка: только вокруг квадрата size×size -------------
@@ -869,6 +1031,12 @@ def generate_barcode_image(data: str, options: Optional[dict] = None,
         eye_style = str(pick('eyeStyle', default='') or '').strip().lower()
         if eye_style != 'circle':
             eye_style = ''
+        # Форма угловых элементов целиком: квадрат / круг / ромб / капля
+        # / восьмиугольник.
+        eye_shape = str(pick('eyeShape', default='') or '').strip().lower()
+        if eye_shape not in ('square', 'circle', 'diamond',
+                             'drop', 'octagon'):
+            eye_shape = ''
         eye_color = _qr_hex(pick('eyeColor'))
         dark_spec = pick('dark', 'color')
         light_spec = pick('light', 'bgcolor', 'bgColor')
@@ -963,6 +1131,7 @@ def generate_barcode_image(data: str, options: Optional[dict] = None,
                 'grad_dark': grad_dark, 'grad_light': grad_light,
                 'dot_radius': dot_radius, 'eye_radius': eye_radius,
                 'module_style': module_style, 'eye_style': eye_style,
+                'eye_shape': eye_shape,
                 'eye_color': eye_color,
                 'has_bg': has_bg, 'bg_url': bg_url,
                 'bg_blur_raw': bg_blur_raw,
@@ -981,7 +1150,7 @@ def generate_barcode_image(data: str, options: Optional[dict] = None,
         # стилевое (градиенты, радиусы, стили модулей, глаза, фон) —
         # послойная сборка маской-композитом.
         use_mask = (grad_dark is not None or grad_light is not None
-                    or dot_radius > 0 or eye_radius > 0
+                    or dot_radius > 0 or eye_radius > 0 or eye_shape != ''
                     or module_style != '' or eye_color is not None or has_bg)
 
         if not use_mask:
@@ -1000,10 +1169,10 @@ def generate_barcode_image(data: str, options: Optional[dict] = None,
         else:
             # Послойно: фон (база/градиент/картинка) → модули → глаза.
             stylized = (dot_radius > 0 or eye_radius > 0
-                        or module_style != '')
+                        or module_style != '' or eye_shape != '')
             if stylized:
                 mask = _qr_modules_mask(qr, dot_radius, eye_radius,
-                                        module_style, eye_style)
+                                        module_style, eye_style, eye_shape)
             else:
                 mask = ImageOps.invert(
                     qr.make_image(fill_color='black',
@@ -1046,7 +1215,8 @@ def generate_barcode_image(data: str, options: Optional[dict] = None,
                 # Глаза отдельным слоем поверх модулей — только сплошной
                 # eyeColor (градиент на глаза не распространяется).
                 eyes_full = _qr_fit_mask(
-                    _qr_eyes_mask(qr, eye_radius, eye_style), size, total_h)
+                    _qr_eyes_mask(qr, eye_radius, eye_style, eye_shape),
+                    size, total_h)
                 eye_layer = Image.new('RGB', (size, total_h),
                                       _qr_rgb(eye_color))
                 img = Image.composite(eye_layer, img, eyes_full)
